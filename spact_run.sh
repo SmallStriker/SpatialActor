@@ -22,9 +22,9 @@ python spatial_actor/eval.py \
 CUDA_VISIBLE_DEVICES=0 \
 python spatial_actor/eval.py \
 --eval-datafolder /data/et24-hgf/test \
---model-path /home/et24-huanggf/robot/SpatialActor/run_logs/testA800_EXP_testA800/model_last.pth \
+--model-path /home/et24-huanggf/robot/SpatialActor/run_logs/test_EXP_test/model_20.pth \
 --tasks all \
 --device 0 \
 --eval-episodes 25 \
---log-name rlbench_all_2_with_original_eval \
+--log-name rlbench_all_2_with_original_eval_20 \
 --headless

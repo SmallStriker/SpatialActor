@@ -193,8 +193,10 @@ def eval(
             lang_goal = eval_env._lang_goal
             task_lang_goals.append(lang_goal)
             if verbose:
+                fail_reason = episode_rollout[-1].info.get('fail_reason', 'Unknown') if len(episode_rollout) > 0 else 'No transitions'
+                status_str = "Success" if reward >= 1 else f"Failed ({fail_reason})"
                 print(
-                    f"Evaluating {task_name} | Episode {ep} | Score: {reward} | Episode Length: {len(episode_rollout)} | Lang Goal: {lang_goal}"
+                    f"Evaluating {task_name} | Episode {ep} | Score: {reward} | Episode Length: {len(episode_rollout)} | Lang Goal: {lang_goal} | Status: {status_str}"
                 )
 
         # report summaries
@@ -325,6 +327,9 @@ def get_model_index(filename):
 def _eval(args):
     tb = TensorboardManager(args.eval_log_dir)
     tasks_to_eval = deepcopy(args.tasks)
+    if tasks_to_eval[0] == "all":
+        from spatial_actor.utils.agent_utils import RLBENCH_TASKS
+        tasks_to_eval = RLBENCH_TASKS
 
     model_idx = get_model_index(args.model_path)
     if model_idx is None:

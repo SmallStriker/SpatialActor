@@ -1,5 +1,6 @@
 exp_id: base
-tasks: all
+# tasks: all
+tasks: put_item_in_drawer,stack_blocks,place_shape_in_shape_sorter,open_drawer,push_buttons,stack_cups
 bs: 8
 epochs: 50
 num_workers: 8

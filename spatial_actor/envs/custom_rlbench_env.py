@@ -153,6 +153,19 @@ class CustomRLBenchEnv(RLBenchEnv):
 
             self._last_exception = e
 
+        info = {}
+        if success:
+            info['fail_reason'] = 'Success'
+        elif terminal:
+            if getattr(self, '_last_exception', None) is not None:
+                info['fail_reason'] = type(self._last_exception).__name__
+            else:
+                info['fail_reason'] = 'Task Fail Condition Met'
+        elif self._i + 1 >= self._episode_length:
+            info['fail_reason'] = 'Timeout/Episode Length Exhausted'
+        else:
+            info['fail_reason'] = 'Unknown'
+
         summaries = []
         self._i += 1
         if ((terminal or self._i == self._episode_length) and
@@ -172,7 +185,7 @@ class CustomRLBenchEnv(RLBenchEnv):
                 self._last_exception = None
 
             summaries.append(TextSummary('errors', f"Success: {success} | " + error_str))
-        return Transition(obs, reward, terminal, summaries=summaries)
+        return Transition(obs, reward, terminal, info=info, summaries=summaries)
 
     def reset_to_demo(self, i):
         self._i = 0
@@ -313,6 +326,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         obs = self._previous_obs_dict  # in case action fails.
 
         try:
+            ######## self._task.step(action) 返回的 reward 默认等于 float(success) ### 任务成功失败判定，成功得1，失败得0
             obs, reward, terminal = self._task.step(action)
             if reward >= 1:
                 success = True
@@ -334,6 +348,19 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
 
             self._last_exception = e
 
+        info = {}
+        if success:
+            info['fail_reason'] = 'Success'
+        elif terminal:
+            if getattr(self, '_last_exception', None) is not None:
+                info['fail_reason'] = type(self._last_exception).__name__
+            else:
+                info['fail_reason'] = 'Task Fail Condition Met'
+        elif self._i + 1 >= self._episode_length:
+            info['fail_reason'] = 'Timeout/Episode Length Exhausted'
+        else:
+            info['fail_reason'] = 'Unknown'
+
         summaries = []
         self._i += 1
         if ((terminal or self._i == self._episode_length) and
@@ -354,7 +381,7 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
                 self._last_exception = None
 
             summaries.append(TextSummary('errors', f"Success: {success} | " + error_str))
-        return Transition(obs, reward, terminal, summaries=summaries)
+        return Transition(obs, reward, terminal, info=info, summaries=summaries)
 
     def reset_to_demo(self, i, variation_number=-1):
         if self._episodes_this_task == self._swap_task_every:

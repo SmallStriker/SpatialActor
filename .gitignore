@@ -1,2 +1,6 @@
 /.idea/
 /.vscode/
+/run_logs/
+/pretrain_model/
+/third_libs/
+nohup.out

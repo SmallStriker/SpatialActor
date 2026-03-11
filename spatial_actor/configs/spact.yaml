@@ -29,6 +29,7 @@ model:
   reenc_text: False
   sem_enc_type: CLIP-RN101
   geo_enc_type: RN50
-  dep_exp_type: 'DA-vitb'
-  dep_exp_path: '/data/ckpt/spact/pretrained'
+  dep_exp_type: 'DA-vits'
+  # dep_exp_path: '/data/ckpt/spact/pretrained'
+  dep_exp_path: '/home/et24-huanggf/robot/SpatialActor/pretrain_model'
   align_loss: 0.0

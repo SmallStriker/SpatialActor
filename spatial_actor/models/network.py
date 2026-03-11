@@ -81,6 +81,7 @@ class Network(nn.Module):
         self.lang_dim = lang_dim
         self.lang_len = lang_len
 
+        global BoxRenderer
         from point_renderer.rvt_renderer import RVTBoxRenderer as BoxRenderer
         global BoxRenderer
 
@@ -307,6 +308,7 @@ class Network(nn.Module):
                     _lang_dim == self.lang_dim
                 ), "Does not support lang_emb of shape {lang_emb.shape}"
 
+            ### 从原始点云当中渲染新视角图像
             img = self.render(
                 pc=pc,
                 img_feat=img_feat,
@@ -321,7 +323,7 @@ class Network(nn.Module):
         else:
             wpt_local_stage_one = wpt_local
 
-        out = self.spatial_actor1(
+        out = self.spatial_actor1( ### 全局场景预测粗略位置
             img=img,
             proprio=proprio,
             lang_emb=lang_emb,
@@ -338,6 +340,10 @@ class Network(nn.Module):
                 wpt_local_stage_one_noisy = model_utils.add_uni_noi(
                     wpt_local_stage_one.clone().detach(), 2 * self.st_wpt_loc_aug
                 )
+                ###### 获取局部场景
+                # 这里的关键逻辑：trans_pc
+                # 将点云平移到以 stage 1 预测的位置 (wpt_local) 为中心
+                # 并进行缩放 (sca)，相当于“放大”了局部区域
                 pc, rev_trans = model_utils.trans_pc(
                     pc, loc=wpt_local_stage_one_noisy, sca=self.st_sca
                 )
@@ -366,6 +372,7 @@ class Network(nn.Module):
                 # must pass None to spacial_actor2 while in eval
                 wpt_local2 = None
 
+            ## 重新渲染这个“放大后”的局部点云
             img = self.render(
                 pc=pc,
                 img_feat=img_feat,
@@ -374,6 +381,7 @@ class Network(nn.Module):
                 dyn_cam_info=None,
             )
 
+        ## 基于局部高清图，预测精细的旋转动作
         out_spacial_actor2 = self.spatial_actor2(
             img=img,
             proprio=proprio,

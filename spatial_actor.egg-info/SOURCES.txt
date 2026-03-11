@@ -1,0 +1,10 @@
+README.md
+setup.py
+spatial_actor/__init__.py
+spatial_actor/eval.py
+spatial_actor/train.py
+spatial_actor.egg-info/PKG-INFO
+spatial_actor.egg-info/SOURCES.txt
+spatial_actor.egg-info/dependency_links.txt
+spatial_actor.egg-info/requires.txt
+spatial_actor.egg-info/top_level.txt

@@ -1,0 +1,37 @@
+Metadata-Version: 2.1
+Name: spatial_actor
+Version: 0.0.1
+Summary: SpatialActor
+Home-page: 
+Author: Hao Shi
+Author-email: shihao1895@gmail.com
+Keywords: Embodied AI,Robotic Learning,Manipulation
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Natural Language :: English
+Classifier: Topic :: Scientific/Engineering
+Requires-Dist: einops
+Requires-Dist: pyrender
+Requires-Dist: omegaconf
+Requires-Dist: natsort
+Requires-Dist: cffi
+Requires-Dist: pandas
+Requires-Dist: yacs
+Requires-Dist: triton==2.0.0
+Requires-Dist: imageio
+Requires-Dist: jupyter
+Requires-Dist: trimesh
+Requires-Dist: meshcat
+Requires-Dist: pyquaternion
+Requires-Dist: matplotlib
+Requires-Dist: opencv-python-headless==4.11.0.86
+Requires-Dist: pycparser==2.21
+Requires-Dist: numpy==1.26.4
+Requires-Dist: scipy==1.13.1
+Requires-Dist: setuptools==69.5.1
+Requires-Dist: wheel==0.41.2
+Requires-Dist: transformers==4.40.1
+Requires-Dist: tensorflow==2.17.0
+Requires-Dist: bitsandbytes==0.38.1
+Requires-Dist: transforms3d==0.4.2
+Requires-Dist: clip@ git+https://github.com/openai/CLIP.git

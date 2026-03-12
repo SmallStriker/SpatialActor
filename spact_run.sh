@@ -6,7 +6,7 @@ python spatial_actor/train.py \
 --train-replay-dir /data/et24-hgf/replay/replay_train \
 --log-dir run_logs \
 --cfg_path spatial_actor/configs/spact.yaml \
---cfg_opts "exp_id 5_train_vits"
+--cfg_opts "exp_id 6_tasks_dpvitb"
 
 ### test
 CUDA_VISIBLE_DEVICES=5 \

@@ -36,8 +36,8 @@ _C.noise_type = 'none'
 _C.model = CN()
 _C.model.sem_enc_type = 'CLIP-RN50'
 _C.model.geo_enc_type = 'RN50'
-_C.model.dep_exp_type = 'DA-vits'
-_C.model.dep_exp_path = '/home/et24-huanggf/robot/SpatialActor/pretrain_model/depth_anything_v2_vits.pth'
+_C.model.dep_exp_type = 'DA-vitb'
+_C.model.dep_exp_path = '/home/et24-huanggf/robot/SpatialActor/pretrain_model/depth_anything_v2_vitb.pth'
 
 _C.model.lang_dim = 512
 _C.model.lang_len = 77
@@ -46,7 +46,7 @@ _C.model.proprio_dim = 4
 _C.model.proprio_cat_dim = 64
 _C.model.im_channels = 128
 
-_C.model.spt_view_layers = 4 # 视图哪transformer层
+_C.model.spt_view_layers = 4 # 视图内transformer层
 _C.model.spt_scene_layers = 4 # 视图间transformer层
 _C.model.attn_dim = 512
 _C.model.attn_heads = 8

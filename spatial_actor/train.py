@@ -183,12 +183,15 @@ def main(rank, cmd_args, devices, port):
 
     # Things to change
     BATCH_SIZE_TRAIN = cfg.bs
-    # iterations per epoch
-    TRAINING_ITERATIONS = int(cfg.train_iter // (cfg.bs * len(devices)))
     EPOCHS = cfg.epochs
     log_dir = get_logdir(cmd_args, cfg)
     tasks = get_tasks(cfg)
     print("Training on {} tasks: {}".format(len(tasks), tasks))
+
+    # 单epoch样本数随任务数线形缩放: 18个任务时样本数为 cfg.train_iter
+    scaled_train_iter = cfg.train_iter * (len(tasks) / 18.0)
+    # iterations per epoch
+    TRAINING_ITERATIONS = int(scaled_train_iter // (cfg.bs * len(devices)))
 
     # for maintaining backward compatibility
     assert cfg.model.num_rot == cfg.num_rotation_classes, print(

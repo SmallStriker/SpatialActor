@@ -9,7 +9,6 @@ from spatial_actor.models.modules.depth_expert.depth_anything_v2 import DepthAny
 import spatial_actor.utils.model_utils as model_utils
 from spatial_actor.models.model import SpatialActor
 
-################## original no change
 
 def encoder_text(clip_model, dtype, texts=None, tokens=None, return_cls=False):
     assert texts is not None or tokens is not None
@@ -119,16 +118,20 @@ class Network(nn.Module):
         for p in self.depth_expert.parameters():
             p.requires_grad = False
 
+        ######################### add_depth_mae ##########################
         self.spatial_actor1 = SpatialActor(
             **args,
             renderer=self.renderer,
-            no_feat=True)
+            no_feat=True,
+            enable_mae=False)
 
         self.spatial_actor2 = SpatialActor(
             **args,
             renderer=self.renderer,
-            no_feat=False)
-
+            no_feat=False,
+            enable_mae=True,
+            mae_mask_ratio=0.5)
+        ######################### add_depth_mae ##########################
 
     def get_pt_loc_on_img(self, pt, spact_1_or_2, dyn_cam_info, out=None):
         """

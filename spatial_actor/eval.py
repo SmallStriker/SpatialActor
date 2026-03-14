@@ -418,6 +418,12 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # 处理逗号分隔的任务名称并去重/去空格
+    processed_tasks = []
+    for t in args.tasks:
+        processed_tasks.extend([task.strip() for task in t.split(',') if task.strip()])
+    args.tasks = processed_tasks
+
     assert args.model_path is not None
 
     if args.log_name is None:

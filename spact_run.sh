@@ -22,8 +22,8 @@ python spatial_actor/eval.py \
 CUDA_VISIBLE_DEVICES=0 \
 python spatial_actor/eval.py \
 --eval-datafolder /data/et24-hgf/test \
---model-path /home/et24-huanggf/robot/SpatialActor/run_logs/test_EXP_test/model_20.pth \
---tasks all \
+--model-path /home/et24-huanggf/robot/SpatialActor/run_logs/6_tasks_dpvitb_EXP_6_TSK_dpvitb/model_40.pth \
+--tasks put_item_in_drawer,stack_blocks,place_shape_in_shape_sorter,open_drawer,push_buttons,stack_cups \
 --device 0 \
 --eval-episodes 25 \
 --log-name rlbench_all_2_with_original_eval_20 \

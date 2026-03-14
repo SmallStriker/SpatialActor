@@ -7,8 +7,6 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.ops import FeaturePyramidNetwork
 
-######### original no change 
-
 from spatial_actor.models.modules.attn import (
     Conv2DBlock,
     PreNorm,
@@ -438,6 +436,71 @@ class SpatialTransformer(nn.Module):
 
         return x
 
+        ######################### add_depth_mae ##########################
+class MAEDepthDecoder(nn.Module):
+    def __init__(self, in_dim, depth=1, heads=4, dim_head=64, dropout=0., xops=False):
+        super().__init__()
+        self.mask_token = nn.Parameter(torch.randn(1, 1, in_dim))
+        
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(in_dim, Attention(in_dim, heads=heads, dim_head=dim_head, dropout=dropout, use_fast=xops)),
+                PreNorm(in_dim, FeedForward(in_dim))
+            ]))
+        
+        self.to_depth = nn.Sequential(
+            nn.Linear(in_dim, in_dim),
+            nn.GELU(),
+            nn.Linear(in_dim, 1) # simple depth regression to scalar
+        )
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+    def forward(self, x, mask_ratio=0.5):
+        # x: (B, L, C)
+        B, L, C = x.shape
+        
+        # generate random mask
+        noise = torch.rand(B, L, device=x.device)
+        
+        # sort noise for each sample
+        ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
+        ids_restore = torch.argsort(ids_shuffle, dim=1)
+        
+        len_keep = int(L * (1 - mask_ratio))
+        
+        # Create mask: 0 is keep, 1 is remove
+        mask = torch.ones([B, L], device=x.device)
+        mask[:, :len_keep] = 0
+        mask = torch.gather(mask, dim=1, index=ids_restore)
+        
+        # Apply mask tokens
+        x_in = x.clone()
+        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, C)
+        mask_token_expanded = self.mask_token.expand(B, L, -1)
+        
+        x_in = x_in * (1 - mask_expanded) + mask_token_expanded * mask_expanded
+        
+        # Run Decoder
+        for attn, ff in self.layers:
+            x_in = attn(x_in) + x_in
+            x_in = ff(x_in) + x_in
+            
+        # Predict
+        pred_depth = self.to_depth(x_in)
+        
+        return pred_depth, mask
+
+        ######################### add_depth_mae ##########################
 
 class SpatialActor(nn.Module):
     def __init__(
@@ -572,6 +635,11 @@ class SpatialActor(nn.Module):
         self.no_feat = no_feat
         self.align_loss = align_loss
 
+        ######################### add_depth_mae ##########################
+        self.enable_mae = kwargs.get('enable_mae', False)
+        self.mae_mask_ratio = kwargs.get('mae_mask_ratio', 0.5)
+        ######################### add_depth_mae ##########################
+
         self.renderer = renderer
 
         self.num_img = self.renderer.num_img
@@ -675,6 +743,18 @@ class SpatialActor(nn.Module):
             attn_dropout=attn_dropout,
             xops=xops,
         ) 
+
+        ######################### add_depth_mae ##########################
+        if self.enable_mae:
+            self.mae_decoder = MAEDepthDecoder(
+                in_dim=self.input_dim_before_seq,
+                depth=1, # Keep it light
+                heads=4,
+                dim_head=64,
+                dropout=attn_dropout,
+                xops=xops
+            )
+            ######################### add_depth_mae ##########################
 
         # Trans Head (trans_head): 使用 ConvexUpSample（凸上采样）将 Transformer 输出的特征图上采样回原始分辨率，
         # 并生成 1通道的热力图，预测动作的空间位置（Where to act）
@@ -823,6 +903,29 @@ class SpatialActor(nn.Module):
             proprio_feat=proprio_feat if self.add_proprio else None,
         )
 
+        ######################### add_depth_mae ##########################
+        if self.enable_mae and self.training:
+            # x is (BS, Num_Img, C, H, W)
+            _b_mae, _n_mae, _c_mae, _h_mae, _w_mae = x.shape
+            # Flatten to (BS*NumImg, H*W, C)
+            x_mae = x.view(_b_mae * _n_mae, _c_mae, _h_mae * _w_mae).permute(0, 2, 1)
+            
+            # Predict with masking
+            pred_depth, _ = self.mae_decoder(x_mae, mask_ratio=self.mae_mask_ratio)
+            
+            # Reshape back to (BS*NumImg, 1, H, W)
+            pred_depth = pred_depth.permute(0, 2, 1).view(_b_mae * _n_mae, 1, _h_mae, _w_mae)
+            
+            # Get GT Depth from d0 (channel 6)
+            gt_depth = d0[:, 6:7]
+            # Downsample to feature resolution
+            gt_depth_down = F.interpolate(gt_depth, size=(_h_mae, _w_mae), mode='bilinear', align_corners=False)
+            
+            mae_depth_loss = F.mse_loss(pred_depth, gt_depth_down)
+        else:
+            mae_depth_loss = None
+        ######################### add_depth_mae ##########################
+
         # action head # # 8. 全局特征池化 (辅助)
         feat = []
         _feat = torch.max(torch.max(x, dim=-1)[0], dim=-1)[0]
@@ -920,7 +1023,11 @@ class SpatialActor(nn.Module):
             align_feats.update({'align_loss': self.align_loss})
 
             out.update({'align_feats': align_feats})
+        ######################### add_depth_mae ##########################
+        if mae_depth_loss is not None:
+            out['depth_loss'] = mae_depth_loss
 
+        ######################### add_depth_mae ##########################
         return out
 
 

@@ -188,7 +188,7 @@ def main(rank, cmd_args, devices, port):
     tasks = get_tasks(cfg)
     print("Training on {} tasks: {}".format(len(tasks), tasks))
 
-    # 单epoch样本数随任务数线形缩放: 18个任务时样本数为 cfg.train_iter
+    #################### 单epoch样本数随任务数线形缩放: 18个任务时样本数为 cfg.train_iter
     scaled_train_iter = cfg.train_iter * (len(tasks) / 18.0)
     # iterations per epoch
     TRAINING_ITERATIONS = int(scaled_train_iter // (cfg.bs * len(devices)))

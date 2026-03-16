@@ -19,7 +19,6 @@ import spatial_actor.utils.model_utils as model_utils
 import spatial_actor.utils.agent_utils as agent_utils
 from spatial_actor.utils.lr_sched_utils import GradualWarmupScheduler, Lamb
 
-######################## without depth anything
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -732,25 +731,25 @@ class Agent:
                         collision_q, action_collision_one_hot.argmax(-1)
                     ).mean()
 
-                # align_loss = torch.zeros(1, device=trans_loss.device, requires_grad=True)
-                # stage1_align_feats = out.get("align_feats", None)
-                # stage2_align_feats = out["spacial_actor2"].get("align_feats", None)
-                # 
-                # if stage2_align_feats is not None:
-                #     stage2_geometic_feat = stage2_align_feats['geometic_feat']
-                #     stage2_depth_expert_feat = stage2_align_feats['depth_expert_feat']
-                #     stage2_align_loss = stage2_align_feats['align_loss']
-                # 
-                #     assert stage1_align_feats is not None
-                #     stage1_geometic_feat = stage1_align_feats['geometic_feat']
-                #     stage1_depth_expert_feat = stage1_align_feats['depth_expert_feat']
-                #     stage1_align_loss = stage1_align_feats['align_loss']
-                #     assert stage1_align_loss == stage2_align_loss
-                # 
-                #     align_loss = 0
-                #     align_loss += comp_align_loss(stage1_geometic_feat, stage1_depth_expert_feat)
-                #     align_loss += comp_align_loss(stage2_geometic_feat, stage2_depth_expert_feat)
-                #     align_loss *= stage1_align_loss
+                align_loss = torch.zeros(1, device=trans_loss.device, requires_grad=True)
+                stage1_align_feats = out.get("align_feats", None)
+                stage2_align_feats = out["spacial_actor2"].get("align_feats", None)
+
+                if stage2_align_feats is not None:
+                    stage2_geometic_feat = stage2_align_feats['geometic_feat']
+                    stage2_depth_expert_feat = stage2_align_feats['depth_expert_feat']
+                    stage2_align_loss = stage2_align_feats['align_loss']
+
+                    assert stage1_align_feats is not None
+                    stage1_geometic_feat = stage1_align_feats['geometic_feat']
+                    stage1_depth_expert_feat = stage1_align_feats['depth_expert_feat']
+                    stage1_align_loss = stage1_align_feats['align_loss']
+                    assert stage1_align_loss == stage2_align_loss
+
+                    align_loss = 0
+                    align_loss += comp_align_loss(stage1_geometic_feat, stage1_depth_expert_feat)
+                    align_loss += comp_align_loss(stage2_geometic_feat, stage2_depth_expert_feat)
+                    align_loss *= stage1_align_loss
 
                 total_loss = (
                     trans_loss
@@ -759,7 +758,7 @@ class Agent:
                     + rot_loss_z
                     + grip_loss
                     + collision_loss
-                    # + align_loss
+                    + align_loss
                 )
 
             self._optimizer.zero_grad(set_to_none=True)
@@ -775,12 +774,12 @@ class Agent:
 
             loss_log = {
                 "total_loss": total_loss.item(),
-                "trans_loss": trans_loss.item(),
-                "rot_loss_x": rot_loss_x.item(),
-                "rot_loss_y": rot_loss_y.item(),
-                "rot_loss_z": rot_loss_z.item(),
-                "grip_loss": grip_loss.item(),
-                "collision_loss": collision_loss.item(),
+                # "trans_loss": trans_loss.item(),
+                # "rot_loss_x": rot_loss_x.item(),
+                # "rot_loss_y": rot_loss_y.item(),
+                # "rot_loss_z": rot_loss_z.item(),
+                # "grip_loss": grip_loss.item(),
+                # "collision_loss": collision_loss.item(),
                 # 'align_loss': align_loss.item(),
                 "lr": self._optimizer.param_groups[0]["lr"],
             }

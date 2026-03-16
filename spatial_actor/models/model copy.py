@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.ops import FeaturePyramidNetwork
 
-######### without depth anything
+######### original no change 
 
 from spatial_actor.models.modules.attn import (
     Conv2DBlock,
@@ -650,19 +650,11 @@ class SpatialActor(nn.Module):
         # 接收：RGB特征 (semantic_feat)、几何特征 (geometic_feat)、以及原始输入 d0
         # 它利用预训练的 Depth Anything 模型提取特征，通过 GateFuser 动态调整融合比例（Alpha 权重），增强几何特征的表达能力
         # 最后通过 FeaturePyramidNetwork (FPN) 将不同尺度的特征融合成统一的特征图 spatial_feat
-        # 注释掉原有的 sem_guide_geo_module 初始化
-        # self.sem_guide_geo_module = SemanticGuidedGeometricModule(
-        #     dep_exp_type=self.dep_exp_type,
-        #     fpn_fuse_dim=self.fpn_fuse_dim,
-        #     align_loss=self.align_loss,
-        # ) # 语义引导几何模块
-
-        # 修改为直接使用 FPN 进行特征融合的主干：将语义特征和几何特征拼接后进行融合提取
-        res_channels = [64, 256, 512, 1024, 2048]
-        self.fpn_fuse = FeaturePyramidNetwork(
-            [c * 2 for c in res_channels], # 拼接后的通道数为原来的2倍
-            self.fpn_fuse_dim
-        )
+        self.sem_guide_geo_module = SemanticGuidedGeometricModule(
+            dep_exp_type=self.dep_exp_type,
+            fpn_fuse_dim=self.fpn_fuse_dim,
+            align_loss=self.align_loss,
+        ) # 语义引导几何模块
 
         ###### 空间transformer主干
         # 接收来自 SemanticGuidedGeometricModule 融合好的 spatial_feat
@@ -792,28 +784,15 @@ class SpatialActor(nn.Module):
         geometic_feat = self.geometric_encoder(depth_normalized)
 
         # semantic guided geometric module
-        ## 修改： 不使用 self.sem_guide_geo_module，直接拼接原始 Semantic Encoder 和 Geometric Encoder 提取的特征并融合
-        # spatial_feat, geometic_feat, depth_expert_feat = self.sem_guide_geo_module(
-        #     depth_expert=depth_expert,
-        #     d0=d0,
-        #     semantic_feat=semantic_feat,
-        #     geometic_feat=geometic_feat,
-        # )
-
-        # ------------------ 修改后数据流 ------------------
-        # 1. 直接拼接 Semantic Encoder(RGB) 和 Geometric Encoder(Depth) 提取的特征 (无 Depth Expert 指导)
-        spatial_feat_dict = {}
-        for k in semantic_feat.keys():
-            # 数据流注释：将各尺度下 semantic_feat 与 geometic_feat 按照通道维度直接首尾拼接 (Cat)
-            spatial_feat_dict[k] = torch.cat([semantic_feat[k], geometic_feat[k]], dim=1)
-        
-        # 2. 拼接后的特征输入到 FPN 中进行多尺度特征融合，提取出 'res3' 层级统一输出
-        # 数据流注释：将混合特征通过 FeaturePyramidNetwork 计算，最终输出 (B, fpn_fuse_dim, H, W) 作为 spatial_feat
-        spatial_feat = self.fpn_fuse(spatial_feat_dict)['res3']
-
-        # 置空未使用的变量以匹配原有接口
-        depth_expert_feat = None
-        # -------------------------------------------------
+        ## 4. 语义引导的几何融合 (Semantic Guided Geometric Module) - **核心创新**
+        # # 这里引入了 "Depth Expert" (Depth Anything)
+        # 结果: spatial_feat 融合了 RGB语义、几何结构 和 Depth Expert 的强力深度先验
+        spatial_feat, geometic_feat, depth_expert_feat = self.sem_guide_geo_module(
+            depth_expert=depth_expert,
+            d0=d0,
+            semantic_feat=semantic_feat,
+            geometic_feat=geometic_feat,
+        )
 
         # language projector # 语言编码投影
         lang_feat = self.lang_proj(
@@ -934,13 +913,13 @@ class SpatialActor(nn.Module):
 
         out.update({"trans": trans}) 
 
-        # if self.align_loss > 0.0 and self.training:
-        #     align_feats = {}
-        #     align_feats.update({'geometic_feat': geometic_feat})
-        #     align_feats.update({'depth_expert_feat': depth_expert_feat})
-        #     align_feats.update({'align_loss': self.align_loss})
-        # 
-        #     out.update({'align_feats': align_feats})
+        if self.align_loss > 0.0 and self.training:
+            align_feats = {}
+            align_feats.update({'geometic_feat': geometic_feat})
+            align_feats.update({'depth_expert_feat': depth_expert_feat})
+            align_feats.update({'align_loss': self.align_loss})
+
+            out.update({'align_feats': align_feats})
 
         return out
 

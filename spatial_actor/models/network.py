@@ -9,7 +9,7 @@ from spatial_actor.models.modules.depth_expert.depth_anything_v2 import DepthAny
 import spatial_actor.utils.model_utils as model_utils
 from spatial_actor.models.model import SpatialActor
 
-####################### without depth anything
+######### 冻结语义和几何编码器权重，clip_vit架构
 
 def encoder_text(clip_model, dtype, texts=None, tokens=None, return_cls=False):
     assert texts is not None or tokens is not None
@@ -104,23 +104,20 @@ class Network(nn.Module):
         else:
             self.clip_model = None
 
-        # --- 注释掉深度专家的初始化和加载 ---
-        # model_configs = {
-        #     'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-        #     'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-        #     'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-        # }
-        # model_type = self.dep_exp_type.replace('DA-', '')
-        # self.depth_expert = DepthAnythingV2(**model_configs[model_type])
-        # self.depth_expert.load_state_dict(
-        #     torch.load(f'{dep_exp_path}/depth_anything_v2_{model_type}.pth')
-        # )
-        # self.depth_expert = self.depth_expert.pretrained
-        # self.add_module("depth_expert", self.depth_expert)
-        # for p in self.depth_expert.parameters():
-        #     p.requires_grad = False
-        self.depth_expert = None
-        # --------------------------------
+        model_configs = {
+            'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+            'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+            'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        }
+        model_type = self.dep_exp_type.replace('DA-', '')
+        self.depth_expert = DepthAnythingV2(**model_configs[model_type])
+        self.depth_expert.load_state_dict(
+            torch.load(f'{dep_exp_path}/depth_anything_v2_{model_type}.pth')
+        )
+        self.depth_expert = self.depth_expert.pretrained
+        self.add_module("depth_expert", self.depth_expert)
+        for p in self.depth_expert.parameters():
+            p.requires_grad = False
 
         self.spatial_actor1 = SpatialActor(
             **args,

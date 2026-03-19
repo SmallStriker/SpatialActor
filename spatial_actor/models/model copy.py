@@ -167,6 +167,8 @@ class RotaryPositionEncoding3D(RotaryPositionEncoding):
 
 
 class SemanticGuidedGeometricModule(nn.Module):
+    #### 将“2D RGB 语义信息”和“3D 深度几何信息”进行深度纠缠和对齐，并借助一个强大的外部“深度专家（DepthAnything）”来提升系统对 3D 空间的感知能力。
+    #### 多模态特征融合引擎
     def __init__(
             self,
             dep_exp_type, # 配置深度专家参数，配置 Expert 模型的通道数。
@@ -239,6 +241,8 @@ class SemanticGuidedGeometricModule(nn.Module):
             else:
                 raise NotImplementedError
 
+            ### 提取“深度专家（Teacher）”先验特征（Step 1）
+            ### 吐出 5 个不同尺度的高质量视觉深度特征（depth_expert_feat）
             depth_expert_feat = depth_expert.get_intermediate_layers(
                 x=rgb_de,
                 n=layer_ids_de,
@@ -247,25 +251,35 @@ class SemanticGuidedGeometricModule(nn.Module):
                 norm=True
             )
 
-        sgm_feat = {}
+        sgm_feat = {} # 增强版的深度特征 sgm_feat
         for i, key in enumerate(['res1', 'res2', 'res3', 'res4', 'res5']):
             feat_r = geometic_feat[key]  ## 原始几何特征（来自 ResNet）
             feat_e = depth_expert_feat[i] ## 深度专家特征
 
-            feat_e_proj = self.gate_proj_layers[i](feat_e) # # 1. 投影专家特征维度
+            feat_e_proj = self.gate_proj_layers[i](feat_e) # # 1. 投影专家特征维度 ######## 投影维度
             feat_d_resized = F.interpolate(feat_e_proj, size=(feat_r.shape[2], feat_r.shape[3]),
-                                           mode='bilinear', align_corners=False) ## 2. 调整尺寸以匹配几何特征分辨率
+                                           mode='bilinear', align_corners=False) ## 2. 调整尺寸以匹配几何特征分辨率 ###### 调整分辨率
 
-            sgm_feat[key] = self.gate_fuse_layers[i](feat_r, feat_d_resized) ## 3. 门控融合
+            sgm_feat[key] = self.gate_fuse_layers[i](feat_r, feat_d_resized) ## 3. 门控融合 ##### 门控融合
 
-        spatial_feat = {}
+        ######## 空间特征
+        # 遍历 Semantic Encoder (RGB) 和 Geometric Encoder (Depth) 的不同特征层
+        # 它们的 keys 通常是 ['res1', 'res2', 'res3', 'res4', 'res5']
+        spatial_feat = {} 
         for k1, k2 in zip(semantic_feat.keys(), sgm_feat.keys()):
-            spatial_feat[k1] = torch.cat([semantic_feat[k1], sgm_feat[k2]], dim=1)
+            # 在通道维度(dim=1)上，将 RGB 语义特征和刚刚融合好专家的深度特征硬拼接起来
+            spatial_feat[k1] = torch.cat([semantic_feat[k1], sgm_feat[k2]], dim=1) # 将原始的 RGB 语义特征（semantic_feat）和增强后的深度特征（sgm_feat）拼接在一起
 
+        # 将每一层拼接好的字典输入给特征金字塔网络（FeaturePyramidNetwork）
+        # 然后只提取其中名为 'res3' 这一层的特征输出
         spatial_feat = self.fpn_fuse(spatial_feat)['res3']
 
-        if self.align_loss > 0.0 and self.training:
+        if self.align_loss > 0.0 and self.training: 
+            #### 如果设置了 align_loss > 0 且在训练阶段，模块会利用 FPN 和全连接层，将你的基础几何网络特征和外部深度专家的特征对齐到同一个维度
+            #### 方便上层（ agent.py）计算知识蒸馏的 Loss（InfoNCE 和 MSE）。让你的小模型“模仿”外援大模型。
             geometic_feat = self.geometric_align_fpn(geometic_feat)['res3']
+            # 抛弃了视野太小的高分辨率低级特征（如 res1, res2）和视野太大但极其模糊的高级特征（如 res4, res5），
+            # 单独提取了中间尺度（也就是 'res3'，通常代表降采样 16 倍的特征图） 作为最终返回给下游 Transformer 的输入。
             depth_expert_feat = F.interpolate(
                 depth_expert_feat[-1],
                 size=geometic_feat.shape[-2:],
@@ -607,7 +621,7 @@ class SpatialActor(nn.Module):
         # img input preprocessing
         self.input_preprocess = lambda x: x
 
-        # semantic encoder # RGB encoder提取语义
+        # semantic encoder ######### RGB encoder提取语义，此处是可训练模式，没有设置 requires_grad = False
         if self.sem_enc_type in ['CLIP-RN50', 'CLIP-RN101']:
             self.semantic_encoder, self.rgb_norm = load_clip(type=self.sem_enc_type.replace('CLIP-', ''))
         elif self.sem_enc_type in ['RN50']:
@@ -617,7 +631,7 @@ class SpatialActor(nn.Module):
 
         self.add_module('semantic_encoder', self.semantic_encoder)
 
-        # geometric encoder # 几何encoder
+        # geometric encoder ######### 几何encoder，代码中没有设置 requires_grad = False，因此它是可训练的。
         if self.geo_enc_type in ['RN50']:
             self.geometric_encoder, self.depth_norm = load_imagenet_res50(pretrained=True)
         else:

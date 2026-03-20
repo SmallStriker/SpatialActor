@@ -28,8 +28,8 @@ model:
   proprio_cat_dim: 64
   lang_dim: 512
   reenc_text: False
-  sem_enc_type: CLIP-RN101
-  geo_enc_type: RN50
+  sem_enc_type: CLIP-RN50 # default = CLIP-RN101, RN50
+  geo_enc_type: RN18 # default RN50,RN18
   dep_exp_type: 'DA-vitb'
   # dep_exp_path: '/data/ckpt/spact/pretrained'
   dep_exp_path: '/home/et24-huanggf/robot/SpatialActor/pretrain_model'

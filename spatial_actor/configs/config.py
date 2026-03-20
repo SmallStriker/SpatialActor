@@ -34,8 +34,8 @@ _C.move_pc_in_bound = True
 _C.noise_type = 'none'
 
 _C.model = CN()
-_C.model.sem_enc_type = 'CLIP-RN50'
-_C.model.geo_enc_type = 'RN50'
+_C.model.sem_enc_type = 'CLIP-RN50' ### DEFAULT = CLIP-RN101, CLIP50
+_C.model.geo_enc_type = 'RN18' #### default = RN50 , RN18
 _C.model.dep_exp_type = 'DA-vitb'
 _C.model.dep_exp_path = '/home/et24-huanggf/robot/SpatialActor/pretrain_model/depth_anything_v2_vitb.pth'
 

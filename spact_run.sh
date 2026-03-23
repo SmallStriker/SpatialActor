@@ -20,10 +20,10 @@ python spatial_actor/eval.py \
 --headless
 
 ### test_6_tasks
-CUDA_VISIBLE_DEVICES=1 \
+CUDA_VISIBLE_DEVICES=2 \
 python spatial_actor/eval.py \
 --eval-datafolder /data/et24-hgf/test \
---model-path /home/et24-huanggf/robot/SpatialActor/run_logs/A100_tasks6_bs16/tasks_6_bs16/model_35.pth \
+--model-path /home/et24-huanggf/robot/SpatialActor/run_logs/6_tasks_clipRN50_newconcat_EXP_6_TSK_clipRN50_newconcat_BS_8/model_50.pth \
 --tasks put_item_in_drawer,stack_blocks,place_shape_in_shape_sorter,open_drawer,push_buttons,stack_cups \
 --device 0 \
 --eval-episodes 25 \

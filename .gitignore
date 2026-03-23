@@ -4,3 +4,10 @@
 /pretrain_model/
 /third_libs/
 nohup.out
+# 忽略所有目录下的 __pycache__ 文件夹
+**/__pycache__/
+# 忽略所有 .pyc 编译文件
+*.pyc
+# 忽略 python 相关的中间件信息
+*.egg-info/
+.pytest_cache/

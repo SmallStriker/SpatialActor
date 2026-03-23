@@ -250,7 +250,7 @@ class SemanticGuidedGeometricModule(nn.Module):
             for i in range(len(geo_channels))
         ])
 
-        from spatial_actor.models.modules.attn import GateFuser
+        # from spatial_actor.models.modules.attn import GateFuser
         self.gate_fuse_layers = nn.ModuleList([
             GateFuser(
                 in_ch_real=geo_channels[i],
@@ -327,7 +327,7 @@ class SemanticGuidedGeometricModule(nn.Module):
         spatial_feat = fpn_out['res3']
         
         # 降采样，将 28x28 压缩为 14x14
-        spatial_feat = self.downsample_conv(spatial_feat)
+        # spatial_feat = self.downsample_conv(spatial_feat)
 
         # if self.align_loss > 0.0 and self.training: 
         #     geometic_feat = self.geometric_align_fpn(geometic_feat)['res3']

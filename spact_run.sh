@@ -39,3 +39,13 @@ python spatial_actor/train.py \
 --log-dir run_logs \
 --cfg_path spatial_actor/configs/spact.yaml \
 --cfg_opts "exp_id 6_tasks_clipRN50_newconcat bs 8"
+
+### clip50+concat+
+python spatial_actor/train.py \
+--device 3 \
+--iter-based \
+--data-folder /data/et24-hgf/train \
+--train-replay-dir /data/et24-hgf/replay/replay_train \
+--log-dir run_logs \
+--cfg_path spatial_actor/configs/spact.yaml \
+--cfg_opts "exp_id clip50+cross_attention bs 8 tasks put_item_in_drawer"

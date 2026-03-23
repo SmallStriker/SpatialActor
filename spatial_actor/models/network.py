@@ -10,6 +10,7 @@ import spatial_actor.utils.model_utils as model_utils
 from spatial_actor.models.model import SpatialActor
 
 ################## clipRN50+RN18+ 改融合机制
+################## bi_cross_attention
 
 def encoder_text(clip_model, dtype, texts=None, tokens=None, return_cls=False):
     assert texts is not None or tokens is not None

@@ -8,6 +8,7 @@ from torchvision import transforms
 from torchvision.ops import FeaturePyramidNetwork
 
 ######### clip50 +resnet18 + MMFusion
+##### bi cross_attention
 
 from spatial_actor.models.modules.attn import (
     Conv2DBlock,
@@ -25,6 +26,40 @@ from spatial_actor.models.modules.backbone import (
 from spatial_actor.models.modules.convex_up import ConvexUpSample
 
 ########## clipRN50+RN18+ 改融合机制
+
+class GateFuser(nn.Module):
+    """
+    Lightweight two-branch feature fusion module that dynamically adjusts the fusion ratio through gating.
+    """
+    def __init__(self, in_ch_real, in_ch_da, mid_ch=128):
+        """
+        Inputs:
+            in_ch_real: Integer, channel dimension of real Depth features.
+            in_ch_da: Integer, channel dimension of Depth Anything features.
+            mid_ch: Integer, channel dimension of the intermediate layer.
+        """
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(in_ch_real + in_ch_da, mid_ch, kernel_size=1)
+        self.bn1 = nn.BatchNorm2d(mid_ch)
+        self.conv2 = nn.Conv2d(mid_ch, 1, kernel_size=1)
+
+    def forward(self, feat_r, feat_d):
+        """
+        Inputs:
+            feat_r: Tensor, real Depth features of shape (B, C_real, H, W).
+            feat_d: Tensor, Depth Anything features of shape (B, C_da, H, W), resized to match feat_r.
+        Returns:
+            fused: Tensor, fused features of shape (B, C_real, H, W).
+        """
+        x_cat = torch.cat([feat_r, feat_d], dim=1)
+        x_mid = F.relu(self.bn1(self.conv1(x_cat)), inplace=True)
+        gating_map = torch.sigmoid(self.conv2(x_mid))  # gating map
+        alpha_r = gating_map  # (B, 1, H, W)
+        alpha_d = 1 - alpha_r  # (B, 1, H, W)
+
+        fused = alpha_r * feat_r + alpha_d * feat_d
+        return fused
 
 class BiDirectionalAttention(nn.Module):
     """同尺度下的 语义与几何 双向交叉注意力交互模块"""

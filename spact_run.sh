@@ -49,3 +49,9 @@ python spatial_actor/train.py \
 --log-dir run_logs \
 --cfg_path spatial_actor/configs/spact.yaml \
 --cfg_opts "exp_id clip50+cross_attention bs 8 tasks put_item_in_drawer"
+
+### new-attention+置信度预测
+source /home/et24-huanggf/anaconda3/etc/profile.d/conda.sh
+conda activate spact
+cd /home/et24-huanggf/robot/SpatialActor
+python spatial_actor/train.py --cfg_path spatial_actor/configs/spact_ablation_sparse.yaml --device 3

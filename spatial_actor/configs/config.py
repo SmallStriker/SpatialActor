@@ -74,6 +74,14 @@ _C.model.st_wpt_loc_inp_no_noise = True
 
 _C.model.reenc_text = False
 _C.model.align_loss = 0.0
+####### 稀疏注意力计算
+_C.model.use_reliability_sgm = False
+_C.model.reliability_use_valid_mask = True
+_C.model.use_sparse_scene_reasoning = False
+_C.model.sparse_keep_ratio = 0.25
+_C.model.sparse_min_fine_tokens = 128
+_C.model.sparse_corr_radius = 0.12
+_C.model.sparse_corr_topk = 8
 
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""

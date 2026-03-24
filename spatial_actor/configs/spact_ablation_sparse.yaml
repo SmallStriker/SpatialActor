@@ -1,4 +1,4 @@
-exp_id: base
+exp_id: ablation_sparse_rn18
 # tasks: all
 tasks: put_item_in_drawer,stack_blocks,place_shape_in_shape_sorter,open_drawer,push_buttons,stack_cups
 bs: 8
@@ -35,9 +35,9 @@ model:
   dep_exp_path: '/home/et24-huanggf/robot/SpatialActor/pretrain_model'
   align_loss: 0.0
   #### 稀疏注意力计算
-  use_reliability_sgm: False
+  use_reliability_sgm: True
   reliability_use_valid_mask: True
-  use_sparse_scene_reasoning: False
+  use_sparse_scene_reasoning: True
   sparse_keep_ratio: 0.25
   sparse_min_fine_tokens: 128
   sparse_corr_radius: 0.12

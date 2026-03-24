@@ -19,6 +19,9 @@ import spatial_actor.utils.model_utils as model_utils
 import spatial_actor.utils.agent_utils as agent_utils
 from spatial_actor.utils.lr_sched_utils import GradualWarmupScheduler, Lamb
 
+######### clipRN50+RN18+ 改融合机制
+######## bi_cross_attention
+
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")

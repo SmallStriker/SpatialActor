@@ -7,8 +7,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.ops import FeaturePyramidNetwork
 
-######### clip50 +resnet18 + MMFusion
-##### bi cross_attention
+######### original no change 
 
 from spatial_actor.models.modules.attn import (
     Conv2DBlock,
@@ -17,6 +16,7 @@ from spatial_actor.models.modules.attn import (
     cache_fn,
     DenseBlock,
     FeedForward,
+    SparseSceneReasoning,
 )
 from spatial_actor.models.modules.backbone import (
     load_clip,
@@ -25,7 +25,6 @@ from spatial_actor.models.modules.backbone import (
 )
 from spatial_actor.models.modules.convex_up import ConvexUpSample
 
-########## clipRN50+RN18+ 改融合机制
 
 class GateFuser(nn.Module):
     """
@@ -61,40 +60,39 @@ class GateFuser(nn.Module):
         fused = alpha_r * feat_r + alpha_d * feat_d
         return fused
 
-class BiDirectionalAttention(nn.Module):
-    """同尺度下的 语义与几何 双向交叉注意力交互模块"""
-    def __init__(self, sem_dim, geo_dim, inter_dim=126, heads=6):
+
+class ReliabilityFuser(nn.Module):
+    """Estimate raw-depth reliability from raw/expert agreement and validity."""
+
+    def __init__(self, in_ch, mid_ch=128, use_valid_mask=True):
         super().__init__()
-        # 1. 维度对齐
-        self.proj_sem = nn.Conv2d(sem_dim, inter_dim, kernel_size=1)
-        self.proj_geo = nn.Conv2d(geo_dim, inter_dim, kernel_size=1)
-        
-        # 2. X-Attention机制
-        self.attn_sem_to_geo = Attention(query_dim=inter_dim, context_dim=inter_dim, heads=heads, dim_head=inter_dim//heads)
-        self.attn_geo_to_sem = Attention(query_dim=inter_dim, context_dim=inter_dim, heads=heads, dim_head=inter_dim//heads)
-        
-        self.norm_sem = nn.LayerNorm(inter_dim)
-        self.norm_geo = nn.LayerNorm(inter_dim)
+        self.use_valid_mask = use_valid_mask
+        in_channels = (in_ch * 4) + 1
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, mid_ch, kernel_size=1),
+            nn.BatchNorm2d(mid_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, mid_ch, kernel_size=3, padding=1),
+            nn.BatchNorm2d(mid_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, 2, kernel_size=1),
+        )
 
-    def forward(self, sem, geo):
-        B, _, H, W = sem.shape
-        
-        sem_proj = self.proj_sem(sem) 
-        geo_proj = self.proj_geo(geo) 
-        
-        # 铺平满足 Attention 维度需求 [B, H*W, inter_dim]
-        sem_flat = sem_proj.flatten(2).permute(0, 2, 1) 
-        geo_flat = geo_proj.flatten(2).permute(0, 2, 1)
-        
-        sem_out = self.norm_sem(sem_flat + self.attn_sem_to_geo(sem_flat, context=geo_flat))
-        geo_out = self.norm_geo(geo_flat + self.attn_geo_to_sem(geo_flat, context=sem_flat))
-        
-        # 将相互渗透后的特征拼接
-        fused = torch.cat([sem_out, geo_out], dim=-1)
-        fused = fused.permute(0, 2, 1).reshape(B, 2 * sem_proj.shape[1], H, W)
-        
-        return fused
+    def forward(self, feat_r, feat_e, valid_mask):
+        # feat_r / feat_e: [B, C, H, W], valid_mask: [B, 1, H, W]
+        discrepancy = (feat_r - feat_e).abs()
+        interaction = feat_r * feat_e
+        fusion_inp = torch.cat((feat_r, feat_e, discrepancy, interaction, valid_mask), dim=1)
+        logits = self.net(fusion_inp)
 
+        raw_reliability = torch.sigmoid(logits[:, :1])
+        disagreement = torch.sigmoid(logits[:, 1:2])
+        if self.use_valid_mask:
+            raw_reliability = raw_reliability * valid_mask
+            disagreement = disagreement * valid_mask + (1.0 - valid_mask)
+
+        fused = raw_reliability * feat_r + (1.0 - raw_reliability) * feat_e
+        return fused, raw_reliability, disagreement
 
 
 class FixedPositionalEncoding(nn.Module):
@@ -205,29 +203,39 @@ class RotaryPositionEncoding3D(RotaryPositionEncoding):
 
 
 class SemanticGuidedGeometricModule(nn.Module):
-    #### 将“2D RGB 语义信息”和“3D 深度几何信息”进行深度纠缠和对齐，并借助一个强大的外部“深度专家（DepthAnything）”来提升系统对 3D 空间的感知能力。
-    #### 多模态特征融合引擎
     def __init__(
             self,
             dep_exp_type,
             fpn_fuse_dim,
             align_loss,
-            sem_channels=[64, 256, 512, 1024, 2048],
-            geo_channels=[64, 64, 128, 256, 512]
+            geo_enc_type='RN50',
+            sem_channels=None,
+            use_reliability_sgm=False,
+            reliability_use_valid_mask=True,
     ):
         super().__init__()
 
         self.fpn_fuse_dim = fpn_fuse_dim
         self.align_loss = align_loss
+        self.use_reliability_sgm = use_reliability_sgm
 
-        model_type = dep_exp_type.replace('DA-', '') # 根据模型名称判断权重类型
+        model_type = dep_exp_type.replace('DA-', '')
         model_configs = {
             'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
             'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
             'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
         }
 
-        mid_channels = geo_channels 
+        if sem_channels is None:
+            sem_channels = [64, 256, 512, 1024, 2048]
+
+        if geo_enc_type == 'RN18':
+            res_channels = [64, 64, 128, 256, 512]
+            mid_channels = [64, 64, 128, 256, 256]
+        else:
+            res_channels = [64, 256, 512, 1024, 2048]
+            mid_channels = [64, 128, 256, 512, 512]
+        fused_channels = [sem_channels[i] + res_channels[i] for i in range(len(res_channels))]
 
         self.depth_expert_norm = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
@@ -237,41 +245,42 @@ class SemanticGuidedGeometricModule(nn.Module):
             self.depth_expert_align_proj = nn.Linear(
                 model_configs[model_type]['out_channels'][-1],
                 fpn_fuse_dim)
-
             self.geometric_align_fpn = FeaturePyramidNetwork(
-                geo_channels,
+                res_channels,
                 fpn_fuse_dim)
 
+        # The current training path uses depth_expert.pretrained (DINO backbone),
+        # so every returned intermediate feature has the same embed_dim.
+        expert_channels = [model_configs[model_type]['out_channels'][-1]] * len(res_channels)
         self.gate_proj_layers = nn.ModuleList([
             nn.Conv2d(
-                model_configs[model_type]['out_channels'][-1],
-                geo_channels[i],
+                expert_channels[i],
+                res_channels[i],
                 kernel_size=1)
-            for i in range(len(geo_channels))
+            for i in range(len(res_channels))
         ])
 
-        # from spatial_actor.models.modules.attn import GateFuser
-        self.gate_fuse_layers = nn.ModuleList([
-            GateFuser(
-                in_ch_real=geo_channels[i],
-                in_ch_da=geo_channels[i],
-                mid_ch=mid_channels[i])
-            for i in range(len(geo_channels))
-        ])
+        if self.use_reliability_sgm:
+            self.gate_fuse_layers = nn.ModuleList([
+                ReliabilityFuser(
+                    in_ch=res_channels[i],
+                    mid_ch=mid_channels[i],
+                    use_valid_mask=reliability_use_valid_mask,
+                )
+                for i in range(len(res_channels))
+            ])
+        else:
+            self.gate_fuse_layers = nn.ModuleList([
+                GateFuser(
+                    in_ch_real=res_channels[i],
+                    in_ch_da=res_channels[i],
+                    mid_ch=mid_channels[i])
+                for i in range(len(res_channels))
+            ])
 
-        self.bida_res3 = BiDirectionalAttention(sem_dim=sem_channels[2], geo_dim=geo_channels[2], inter_dim=fpn_fuse_dim)
-        self.bida_res4 = BiDirectionalAttention(sem_dim=sem_channels[3], geo_dim=geo_channels[3], inter_dim=fpn_fuse_dim)
-        self.bida_res5 = BiDirectionalAttention(sem_dim=sem_channels[4], geo_dim=geo_channels[4], inter_dim=fpn_fuse_dim)
-
-        self.post_bida_fpn = FeaturePyramidNetwork(
-            in_channels_list=[2 * fpn_fuse_dim, 2 * fpn_fuse_dim, 2 * fpn_fuse_dim],
-            out_channels=fpn_fuse_dim
-        )
-
-        self.downsample_conv = nn.Sequential(
-            nn.Conv2d(fpn_fuse_dim, fpn_fuse_dim, kernel_size=3, stride=2, padding=1),
-            nn.GroupNorm(1, fpn_fuse_dim),
-            nn.ReLU(inplace=True)
+        self.fpn_fuse = FeaturePyramidNetwork(
+            fused_channels,
+            fpn_fuse_dim
         )
 
     def forward(
@@ -281,8 +290,8 @@ class SemanticGuidedGeometricModule(nn.Module):
             semantic_feat,
             geometic_feat
     ):
-        with torch.no_grad(): # 提取深度专家特征
-            rgb_de = self.depth_expert_norm(d0[:, 3:6]) 
+        with torch.no_grad():
+            rgb_de = self.depth_expert_norm(d0[:, 3:6])
 
             if depth_expert.n_blocks == 24:
                 layer_ids_de = [11, 14, 17, 20, 23]
@@ -299,50 +308,61 @@ class SemanticGuidedGeometricModule(nn.Module):
                 norm=True
             )
 
-        sgm_feat = {} # 增强版的深度特征
+        valid_depth = (d0[:, 6:7] > 0).float()
+        sgm_feat = {}
+        fusion_maps = {}
+
         for i, key in enumerate(['res1', 'res2', 'res3', 'res4', 'res5']):
-            feat_r = geometic_feat[key]  
-            feat_e = depth_expert_feat[i] 
+            feat_r = geometic_feat[key]
+            feat_e = depth_expert_feat[i]
 
-            feat_e_proj = self.gate_proj_layers[i](feat_e) 
-            feat_d_resized = F.interpolate(feat_e_proj, size=(feat_r.shape[2], feat_r.shape[3]),
-                                           mode='bilinear', align_corners=False) 
+            feat_e_proj = self.gate_proj_layers[i](feat_e)
+            feat_e_proj = F.interpolate(
+                feat_e_proj,
+                size=(feat_r.shape[2], feat_r.shape[3]),
+                mode='bilinear',
+                align_corners=False,
+            )
+            valid_mask = F.interpolate(valid_depth, size=feat_r.shape[-2:], mode='nearest')
 
-            sgm_feat[key] = self.gate_fuse_layers[i](feat_r, feat_d_resized) 
+            if self.use_reliability_sgm:
+                fused_feat, reliability_map, disagreement_map = self.gate_fuse_layers[i](
+                    feat_r, feat_e_proj, valid_mask
+                )
+            else:
+                fused_feat = self.gate_fuse_layers[i](feat_r, feat_e_proj)
+                discrepancy = (feat_r - feat_e_proj).abs().mean(dim=1, keepdim=True)
+                discrepancy = discrepancy / (discrepancy.amax(dim=(2, 3), keepdim=True) + 1e-6)
+                disagreement_map = discrepancy.clamp(0.0, 1.0)
+                reliability_map = (1.0 - disagreement_map) * valid_mask + 0.5 * (1.0 - valid_mask)
 
-        # 在 res3, res4, res5 层做双向注意力
-        fused_res3 = self.bida_res3(semantic_feat['res3'], sgm_feat['res3'])
-        fused_res4 = self.bida_res4(semantic_feat['res4'], sgm_feat['res4'])
-        fused_res5 = self.bida_res5(semantic_feat['res5'], sgm_feat['res5'])
+            sgm_feat[key] = fused_feat
+            fusion_maps[key] = {
+                'reliability_map': reliability_map,
+                'disagreement_map': disagreement_map,
+                'validity_map': valid_mask,
+            }
 
-        from collections import OrderedDict
-        fused_dict = OrderedDict([
-            ('res3', fused_res3),
-            ('res4', fused_res4),
-            ('res5', fused_res5)
-        ])
-        
-        # 将结果拼接并通过 FPN，取 res3 输出
-        fpn_out = self.post_bida_fpn(fused_dict)
-        spatial_feat = fpn_out['res3']
-        
-        # 降采样，将 28x28 压缩为 14x14
-        # spatial_feat = self.downsample_conv(spatial_feat)
+        spatial_feat = {}
+        for k1, k2 in zip(semantic_feat.keys(), sgm_feat.keys()):
+            spatial_feat[k1] = torch.cat([semantic_feat[k1], sgm_feat[k2]], dim=1)
 
-        # if self.align_loss > 0.0 and self.training: 
-        #     geometic_feat = self.geometric_align_fpn(geometic_feat)['res3']
-        #     depth_expert_feat = F.interpolate(
-        #         depth_expert_feat[-1],
-        #         size=geometic_feat.shape[-2:],
-        #         mode='bilinear',
-        #         align_corners=False)
+        spatial_feat = self.fpn_fuse(spatial_feat)['res3']
 
-        #     _b, _c, _h, _w = depth_expert_feat.shape
-        #     depth_expert_feat = depth_expert_feat.reshape(_b, _c, _h * _w).permute(0, 2, 1)
-        #     depth_expert_feat = self.depth_expert_align_proj(depth_expert_feat)
-        #     depth_expert_feat = depth_expert_feat.permute(0, 2, 1).reshape(_b, self.fpn_fuse_dim, _h, _w)
+        if self.align_loss > 0.0 and self.training:
+            geometic_feat = self.geometric_align_fpn(geometic_feat)['res3']
+            depth_expert_feat = F.interpolate(
+                depth_expert_feat[-1],
+                size=geometic_feat.shape[-2:],
+                mode='bilinear',
+                align_corners=False)
 
-        return spatial_feat, geometic_feat, depth_expert_feat
+            _b, _c, _h, _w = depth_expert_feat.shape
+            depth_expert_feat = depth_expert_feat.reshape(_b, _c, _h * _w).permute(0, 2, 1)
+            depth_expert_feat = self.depth_expert_align_proj(depth_expert_feat)
+            depth_expert_feat = depth_expert_feat.permute(0, 2, 1).reshape(_b, self.fpn_fuse_dim, _h, _w)
+
+        return spatial_feat, geometic_feat, depth_expert_feat, fusion_maps['res3']
 
 
 class SpatialTransformer(nn.Module):
@@ -361,10 +381,20 @@ class SpatialTransformer(nn.Module):
             weight_tie_layers,
             attn_dropout,
             xops,
+            use_sparse_scene_reasoning=False,
+            sparse_keep_ratio=0.25,
+            sparse_min_fine_tokens=128,
+            sparse_corr_radius=0.12,
+            sparse_corr_topk=8,
     ):
         super().__init__()
 
         self.lang_len = lang_len
+        self.use_sparse_scene_reasoning = use_sparse_scene_reasoning
+        self.sparse_keep_ratio = sparse_keep_ratio
+        self.sparse_min_fine_tokens = sparse_min_fine_tokens
+        self.sparse_corr_radius = sparse_corr_radius
+        self.sparse_corr_topk = sparse_corr_topk
 
         self.spatial_pe_layer = RotaryPositionEncoding3D(fpn_fuse_dim)
 
@@ -377,55 +407,84 @@ class SpatialTransformer(nn.Module):
             activation=activation,
         )
 
-        self.fc_bef_attn = DenseBlock(  # DenseBlock (Linear)。Transformer 入口处的全连接层，用于将特征维度调整为 attn_dim。
+        self.fc_bef_attn = DenseBlock(
             input_dim_before_seq,
             attn_dim,
             norm=None,
             activation=None,
         )
 
-        self.fc_aft_attn = DenseBlock( # DenseBlock (Linear)。Transformer 出口处的全连接层，将特征恢复回原始维度。
+        self.fc_aft_attn = DenseBlock(
             attn_dim,
             input_dim_before_seq,
             norm=None,
             activation=None,
         )
 
-        get_attn = lambda: PreNorm( # 预归一化多头注意力层
-            attn_dim, # 归一化的维度
+        get_attn = lambda: PreNorm(
+            attn_dim,
             Attention(
-                # 表示在进入注意力层之前先进行 Layer Normalization（层归一化）。
-                # 相比于 Post-Norm（先加残差再归一化），Pre-Norm 在深层网络中训练更稳定
                 attn_dim,
-                heads=attn_heads, # 核心注意力机制
-                dim_head=attn_dim_head, # 每个头的维度
+                heads=attn_heads,
+                dim_head=attn_dim_head,
                 dropout=attn_dropout,
-                use_fast=xops, # 是否使用加速算子 (如 xFormers)
+                use_fast=xops,
             ),
         )
 
-        get_ffn = lambda: PreNorm( # 前馈神经网络
-            attn_dim,
-            FeedForward(attn_dim)
-        )
+        get_ffn = lambda: PreNorm(attn_dim, FeedForward(attn_dim))
 
-        #  权重共享（Weight Tying） 机制
-        # weight_tie_layers，如果为 True：开启权重共享。Transformer 的每一层（Layer 1, Layer 2, ...）实际上都是同一个 nn.Module 对象。
-        # 这意味着网络虽然很深，但参数量并不增加，像循环神经网络（RNN）一样重复使用同一个层
         get_attn, get_ffn = map(cache_fn, (get_attn, get_ffn))
         cache_args = {"_cache": weight_tie_layers}
 
-        self.spt_view_interact = nn.ModuleList([]) # 视图级交互 (self.spt_view_interact)
+        self.spt_view_interact = nn.ModuleList([])
         for _ in range(spt_view_layers):
             self.spt_view_interact.append(
                 nn.ModuleList([get_attn(**cache_args), get_ffn(**cache_args)])
             )
 
-        self.spt_scene_interact = nn.ModuleList([]) # 场景级交互 (self.spt_scene_interact)
+        self.spt_scene_interact = nn.ModuleList([])
         for _ in range(spt_scene_layers):
             self.spt_scene_interact.append(
                 nn.ModuleList([get_attn(**cache_args), get_ffn(**cache_args)])
             )
+
+        self.sparse_scene_interact = nn.ModuleList([
+            SparseSceneReasoning(
+                attn_dim,
+                heads=attn_heads,
+                dim_head=attn_dim_head,
+                dropout=attn_dropout,
+            )
+            for _ in range(spt_scene_layers)
+        ])
+
+    @staticmethod
+    def _compute_scene_importance(xyz, scene_aux):
+        # xyz: [B, V, H, W, 3]
+        depth = xyz[..., 2]
+        dx = torch.zeros_like(depth)
+        dy = torch.zeros_like(depth)
+        dx[..., 1:, :] = (depth[..., 1:, :] - depth[..., :-1, :]).abs()
+        dy[..., :, 1:] = (depth[..., :, 1:] - depth[..., :, :-1]).abs()
+        boundary = dx + dy
+        boundary = boundary / (boundary.amax(dim=(-2, -1), keepdim=True) + 1e-6)
+
+        importance = boundary
+        if scene_aux is not None:
+            reliability = scene_aux.get('reliability_map', None)
+            disagreement = scene_aux.get('disagreement_map', None)
+            validity = scene_aux.get('validity_map', None)
+            if reliability is not None:
+                importance = importance + (1.0 - reliability.view_as(boundary))
+            if disagreement is not None:
+                importance = importance + disagreement.view_as(boundary)
+            if validity is not None:
+                importance = importance + 0.25 * (1.0 - validity.view_as(boundary))
+
+        importance = importance.reshape(xyz.shape[0], -1)
+        importance = importance / (importance.amax(dim=-1, keepdim=True) + 1e-6)
+        return importance
 
     def forward(
             self,
@@ -434,73 +493,75 @@ class SpatialTransformer(nn.Module):
             spatial_feat,
             lang_feat,
             proprio_feat,
+            scene_aux=None,
     ):
-        ### 位置编码注入 (RoPE Injection):
         _b, _c, _h, _w = spatial_feat.shape
         bs = _b // num_img
 
-        # spatial position encoding
-        xyz = d0[:, 0:3]  # 从 d0 提取 xyz 坐标
+        xyz = d0[:, 0:3]
         xyz = F.interpolate(xyz, size=(_h, _w), mode='bilinear', align_corners=False)
-        xyz = xyz.view(bs, num_img, 3, _h, _w).permute(0, 1, 3, 4, 2).reshape(bs, num_img*_h*_w, 3)
+        xyz = xyz.view(bs, num_img, 3, _h, _w).permute(0, 1, 3, 4, 2).reshape(bs, num_img * _h * _w, 3)
         pe = self.spatial_pe_layer(xyz)
-        pe_cos, pe_sin = pe[..., 0], pe[..., 1] # 生成旋转编码 pe_cos, pe_sin
-
-        _b, _c, _h, _w = spatial_feat.shape
+        pe_cos, pe_sin = pe[..., 0], pe[..., 1]
 
         spatial_feat = spatial_feat.view(bs, num_img, _c, _h, _w).permute(0, 1, 3, 4, 2)
-        spatial_feat = spatial_feat.reshape(bs, num_img*_h*_w, _c)
-        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin) # 使用 embed_rotary 将位置信息“乘”入 spatial_feat
+        spatial_feat = spatial_feat.reshape(bs, num_img * _h * _w, _c)
+        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin)
 
-        spatial_feat = spatial_feat.view(bs*num_img, _h, _w, _c).permute(0, 3, 1, 2)
+        spatial_feat = spatial_feat.view(bs * num_img, _h, _w, _c).permute(0, 3, 1, 2)
         spatial_feat = self.spatial_feat_proj(spatial_feat)
 
         _, _c, _h, _w = spatial_feat.shape
         spatial_feat = spatial_feat.view(bs, num_img, _c, _h, _w).permute(0, 2, 1, 3, 4)
 
-        if proprio_feat is not None: # 多模态融合 (Early Fusion)
+        if proprio_feat is not None:
             spatial_feat = torch.cat([spatial_feat, proprio_feat], dim=1)
 
-        # channel last
         spatial_feat = rearrange(spatial_feat, "b d ... -> b ... d")
-
-        # save original shape of input # 展平: 将 (B, Num_Img, C, H, W) 展平为序列 (B, Num_Img*H*W, C)
         spatial_feat_orig_shape = spatial_feat.shape
-
         spatial_feat = rearrange(spatial_feat, "b ... d -> b (...) d")
 
-        lang_feat = lang_feat.view(bs, self.lang_len, -1) 
+        lang_feat = lang_feat.view(bs, self.lang_len, -1)
         num_lang_tok = lang_feat.shape[1]
-        spatial_feat = torch.cat((lang_feat, spatial_feat), dim=1) # 语言指令: 将 lang_feat 拼接到序列头部，类似于 BERT 的 [CLS] token
+        spatial_feat = torch.cat((lang_feat, spatial_feat), dim=1)
 
-        x = self.fc_bef_attn(spatial_feat) # fc_bef_attn 投影
+        x = self.fc_bef_attn(spatial_feat)
+        lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]
 
-        lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]  # 切分出语言部分lx 和图像部分 imgx
-
-        # view-level interaction
-        imgx = imgx.reshape(bs * num_img, _h * _w, -1) # Reshape 成 (BS * Num_Img, H*W, Dim)，强制 Attention 只能在单图内发生
-
-        for attn, ffn in self.spt_view_interact: # 执行 spt_view_interact
-            imgx = attn(imgx) + imgx 
+        imgx = imgx.reshape(bs * num_img, _h * _w, -1)
+        for attn, ffn in self.spt_view_interact:
+            imgx = attn(imgx) + imgx
             imgx = ffn(imgx) + imgx
 
-        # scene-level interaction
-        imgx = imgx.view(bs, num_img * _h * _w, -1)  # Reshape 成 (BS, Total_Seq_Len, Dim)，允许全局 Attention
-        x = torch.cat((lx, imgx), dim=1) # 将语言 lx 和图像 imgx 重新拼接
+        imgx = imgx.view(bs, num_img * _h * _w, -1)
+        if self.use_sparse_scene_reasoning:
+            xyz_map = xyz.view(bs, num_img, _h, _w, 3)
+            scene_importance = self._compute_scene_importance(xyz_map, scene_aux)
+            for block in self.sparse_scene_interact:
+                imgx, lx, _ = block(
+                    img_tokens=imgx,
+                    xyz=xyz,
+                    importance=scene_importance,
+                    lang_tokens=lx,
+                    num_img=num_img,
+                    h=_h,
+                    w=_w,
+                    keep_ratio=self.sparse_keep_ratio,
+                    min_fine_tokens=self.sparse_min_fine_tokens,
+                    corr_radius=self.sparse_corr_radius,
+                    corr_topk=self.sparse_corr_topk,
+                )
+            x = imgx
+        else:
+            x = torch.cat((lx, imgx), dim=1)
+            for attn, ffn in self.spt_scene_interact:
+                x = attn(x) + x
+                x = ffn(x) + x
+            x = x[:, num_lang_tok:]
 
-        for attn, ffn in self.spt_scene_interact: # 执行 spt_scene_interact
-            x = attn(x) + x
-            x = ffn(x) + x
-
-        # throwing away the language embeddings
-        x = x[:, num_lang_tok:] # 丢弃语言 Tokens
-
-        x = self.fc_aft_attn(x) # 恢复维度
-
-        # reshape back to orginal size
-        x = x.view(bs, *spatial_feat_orig_shape[1:-1], x.shape[-1]) # Reshape 回(B, Num_Img, C, H, W) 以供后续的 Action Head 生成热力图
+        x = self.fc_aft_attn(x)
+        x = x.view(bs, *spatial_feat_orig_shape[1:-1], x.shape[-1])
         x = rearrange(x, "b ... d -> b d ...")
-
         return x
 
 
@@ -538,6 +599,13 @@ class SpatialActor(nn.Module):
         renderer,
         no_feat,
         align_loss,
+        use_reliability_sgm=False,
+        reliability_use_valid_mask=True,
+        use_sparse_scene_reasoning=False,
+        sparse_keep_ratio=0.25,
+        sparse_min_fine_tokens=128,
+        sparse_corr_radius=0.12,
+        sparse_corr_topk=8,
         **kwargs,
     ):
         """
@@ -636,6 +704,13 @@ class SpatialActor(nn.Module):
 
         self.no_feat = no_feat
         self.align_loss = align_loss
+        self.use_reliability_sgm = use_reliability_sgm
+        self.reliability_use_valid_mask = reliability_use_valid_mask
+        self.use_sparse_scene_reasoning = use_sparse_scene_reasoning
+        self.sparse_keep_ratio = sparse_keep_ratio
+        self.sparse_min_fine_tokens = sparse_min_fine_tokens
+        self.sparse_corr_radius = sparse_corr_radius
+        self.sparse_corr_topk = sparse_corr_topk
 
         self.renderer = renderer
 
@@ -721,13 +796,15 @@ class SpatialActor(nn.Module):
         # 接收：RGB特征 (semantic_feat)、几何特征 (geometic_feat)、以及原始输入 d0
         # 它利用预训练的 Depth Anything 模型提取特征，通过 GateFuser 动态调整融合比例（Alpha 权重），增强几何特征的表达能力
         # 最后通过 FeaturePyramidNetwork (FPN) 将不同尺度的特征融合成统一的特征图 spatial_feat
-        self.multimodal_fusion = SemanticGuidedGeometricModule(
+        self.sem_guide_geo_module = SemanticGuidedGeometricModule(
             dep_exp_type=self.dep_exp_type,
             fpn_fuse_dim=self.fpn_fuse_dim,
             align_loss=self.align_loss,
+            geo_enc_type=self.geo_enc_type,
             sem_channels=sem_channels,
-            geo_channels=geo_channels,
-        ) # 双向注意力强化版语义引导门控模块
+            use_reliability_sgm=self.use_reliability_sgm,
+            reliability_use_valid_mask=self.reliability_use_valid_mask,
+        ) # 语义引导几何模块
 
         ###### 空间transformer主干
         # 接收来自 SemanticGuidedGeometricModule 融合好的 spatial_feat
@@ -747,6 +824,11 @@ class SpatialActor(nn.Module):
             weight_tie_layers=weight_tie_layers,
             attn_dropout=attn_dropout,
             xops=xops,
+            use_sparse_scene_reasoning=self.use_sparse_scene_reasoning,
+            sparse_keep_ratio=self.sparse_keep_ratio,
+            sparse_min_fine_tokens=self.sparse_min_fine_tokens,
+            sparse_corr_radius=self.sparse_corr_radius,
+            sparse_corr_topk=self.sparse_corr_topk,
         ) 
 
         # Trans Head (trans_head): 使用 ConvexUpSample（凸上采样）将 Transformer 输出的特征图上采样回原始分辨率，
@@ -856,8 +938,11 @@ class SpatialActor(nn.Module):
         ###### 用 ResNet 提取几何特征
         geometic_feat = self.geometric_encoder(depth_normalized)
 
-        # 多模态特征融合层：引入深度专家和双向交叉注意力
-        spatial_feat, geometic_feat, depth_expert_feat = self.multimodal_fusion(
+        # semantic guided geometric module
+        ## 4. 语义引导的几何融合 (Semantic Guided Geometric Module) - **核心创新**
+        # # 这里引入了 "Depth Expert" (Depth Anything)
+        # 结果: spatial_feat 融合了 RGB语义、几何结构 和 Depth Expert 的强力深度先验
+        spatial_feat, geometic_feat, depth_expert_feat, scene_aux = self.sem_guide_geo_module(
             depth_expert=depth_expert,
             d0=d0,
             semantic_feat=semantic_feat,
@@ -891,6 +976,7 @@ class SpatialActor(nn.Module):
             spatial_feat=spatial_feat,
             lang_feat=lang_feat,
             proprio_feat=proprio_feat if self.add_proprio else None,
+            scene_aux=scene_aux,
         )
 
         # action head # # 8. 全局特征池化 (辅助)

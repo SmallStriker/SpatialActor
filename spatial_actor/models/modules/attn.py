@@ -347,3 +347,200 @@ class DenseBlock(nn.Module):
         x = self.norm(x) if self.norm is not None else x
         x = self.activation(x) if self.activation is not None else x
         return x
+
+
+###### scene_level 稀疏注意力
+class PairwiseAttention(nn.Module):
+    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
+        super().__init__()
+        inner_dim = dim_head * heads
+        context_dim = default(context_dim, query_dim)
+        self.scale = dim_head**-0.5
+        self.heads = heads
+
+        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
+        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
+        self.to_out = nn.Linear(inner_dim, query_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, context=None, attn_mask=None):
+        context = default(context, x)
+        h = self.heads
+
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+
+        q, k, v = map(
+            lambda t: rearrange(t, "b n (h d) -> (b h) n d", h=h),
+            (q, k, v),
+        )
+
+        sim = einsum("b i d, b j d -> b i j", q, k) * self.scale
+        if exists(attn_mask):
+            max_neg_value = -torch.finfo(sim.dtype).max
+            attn_mask = repeat(attn_mask, "b i j -> (b h) i j", h=h)
+            sim.masked_fill_(~attn_mask, max_neg_value)
+
+        attn = sim.softmax(dim=-1)
+        attn = self.dropout(attn)
+        out = einsum("b i j, b j d -> b i d", attn, v)
+        out = rearrange(out, "(b h) n d -> b n (h d)", h=h)
+        return self.to_out(out)
+
+
+class SparseSceneReasoning(nn.Module):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0):
+        super().__init__()
+        self.coarse_attn = PreNorm(
+            dim,
+            Attention(
+                dim,
+                heads=heads,
+                dim_head=dim_head,
+                dropout=dropout,
+            ),
+        )
+        self.coarse_ffn = PreNorm(dim, FeedForward(dim))
+        self.fine_cross_attn = PreNorm(
+            dim,
+            PairwiseAttention(
+                dim,
+                heads=heads,
+                dim_head=dim_head,
+                dropout=dropout,
+            ),
+        )
+        self.fine_context_attn = PreNorm(
+            dim,
+            Attention(
+                dim,
+                context_dim=dim,
+                heads=heads,
+                dim_head=dim_head,
+                dropout=dropout,
+            ),
+        )
+        self.fine_ffn = PreNorm(dim, FeedForward(dim))
+
+    @staticmethod
+    def _gather_tokens(x, idx):
+        gather_idx = idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+        return torch.gather(x, 1, gather_idx)
+
+    @staticmethod
+    def _scatter_tokens(base, idx, update):
+        scatter_idx = idx.unsqueeze(-1).expand(-1, -1, base.shape[-1])
+        return base.scatter(1, scatter_idx, update)
+
+    @staticmethod
+    def _coarse_stride(h, w, keep_ratio):
+        if min(h, w) >= 16 and keep_ratio <= 0.25:
+            return 4
+        if min(h, w) >= 8 and keep_ratio <= 0.5:
+            return 2
+        return 1
+
+    @staticmethod
+    def _build_pairwise_mask(fine_xyz, fine_views, corr_radius, corr_topk):
+        bsz, k, _ = fine_xyz.shape
+        dist = torch.cdist(fine_xyz.float(), fine_xyz.float())
+        cross_view = fine_views.unsqueeze(-1) != fine_views.unsqueeze(1)
+        radius_mask = dist <= corr_radius
+
+        topk = min(corr_topk, max(k - 1, 1))
+        masked_dist = dist.masked_fill(~cross_view, float("inf"))
+        nn_idx = masked_dist.topk(topk, dim=-1, largest=False).indices
+        topk_mask = torch.zeros_like(cross_view)
+        topk_mask.scatter_(2, nn_idx, True)
+
+        pairwise_mask = cross_view & (radius_mask | topk_mask)
+        eye = torch.eye(k, device=fine_xyz.device, dtype=torch.bool).unsqueeze(0)
+        pairwise_mask = pairwise_mask | eye
+        no_neighbor = ~pairwise_mask.any(dim=-1, keepdim=True)
+        pairwise_mask = pairwise_mask | (eye & no_neighbor)
+        return pairwise_mask
+
+    def forward(
+        self,
+        img_tokens,
+        xyz,
+        importance,
+        lang_tokens,
+        num_img,
+        h,
+        w,
+        keep_ratio,
+        min_fine_tokens,
+        corr_radius,
+        corr_topk,
+    ):
+        # img_tokens: [B, V*H*W, C]
+        # xyz: [B, V*H*W, 3]
+        # importance: [B, V*H*W]
+        bs, total_tokens, dim = img_tokens.shape
+
+        stride = self._coarse_stride(h, w, keep_ratio)
+        coarse_h = math.ceil(h / stride)
+        coarse_w = math.ceil(w / stride)
+
+        img_map = img_tokens.view(bs, num_img, h, w, dim).permute(0, 1, 4, 2, 3)
+        img_map = img_map.reshape(bs * num_img, dim, h, w)
+        xyz_map = xyz.view(bs, num_img, h, w, 3).permute(0, 1, 4, 2, 3)
+        xyz_map = xyz_map.reshape(bs * num_img, 3, h, w)
+
+        coarse_img_map = F.avg_pool2d(img_map, kernel_size=stride, stride=stride, ceil_mode=True)
+        coarse_xyz_map = F.avg_pool2d(xyz_map, kernel_size=stride, stride=stride, ceil_mode=True)
+
+        coarse_tokens = coarse_img_map.view(bs, num_img, dim, coarse_h, coarse_w)
+        coarse_tokens = coarse_tokens.permute(0, 1, 3, 4, 2).reshape(bs, num_img * coarse_h * coarse_w, dim)
+        coarse_xyz = coarse_xyz_map.view(bs, num_img, 3, coarse_h, coarse_w)
+        coarse_xyz = coarse_xyz.permute(0, 1, 3, 4, 2).reshape(bs, num_img * coarse_h * coarse_w, 3)
+
+        coarse_seq = torch.cat((lang_tokens, coarse_tokens), dim=1)
+        coarse_seq = self.coarse_attn(coarse_seq) + coarse_seq
+        coarse_seq = self.coarse_ffn(coarse_seq) + coarse_seq
+
+        lang_len = lang_tokens.shape[1]
+        coarse_lang = coarse_seq[:, :lang_len]
+        coarse_ctx = coarse_seq[:, lang_len:]
+
+        fine_k = min(total_tokens, max(min_fine_tokens, int(total_tokens * keep_ratio)))
+        fine_idx = importance.topk(fine_k, dim=-1).indices
+        fine_tokens = self._gather_tokens(img_tokens, fine_idx)
+        fine_xyz = self._gather_tokens(xyz, fine_idx)
+        fine_views = fine_idx // (h * w)
+
+        pairwise_mask = self._build_pairwise_mask(fine_xyz, fine_views, corr_radius, corr_topk)
+        fine_tokens = self.fine_cross_attn(
+            fine_tokens,
+            context=fine_tokens,
+            attn_mask=pairwise_mask,
+        ) + fine_tokens
+
+        context_tokens = torch.cat((coarse_lang, coarse_ctx), dim=1)
+        fine_tokens = self.fine_context_attn(
+            fine_tokens,
+            context=context_tokens,
+        ) + fine_tokens
+        fine_tokens = self.fine_ffn(fine_tokens) + fine_tokens
+
+        dense_coarse = F.interpolate(
+            coarse_img_map,
+            size=(h, w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        dense_coarse = dense_coarse.view(bs, num_img, dim, h, w)
+        dense_coarse = dense_coarse.permute(0, 1, 3, 4, 2).reshape(bs, total_tokens, dim)
+
+        updated_tokens = img_tokens + dense_coarse
+        updated_tokens = self._scatter_tokens(updated_tokens, fine_idx, fine_tokens)
+
+        aux = {
+            "fine_idx": fine_idx,
+            "fine_views": fine_views,
+            "coarse_xyz": coarse_xyz,
+        }
+        return updated_tokens, coarse_lang, aux

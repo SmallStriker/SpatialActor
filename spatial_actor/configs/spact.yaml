@@ -34,11 +34,11 @@ model:
   # dep_exp_path: '/data/ckpt/spact/pretrained'
   dep_exp_path: '/home/et24-huanggf/robot/SpatialActor/pretrain_model'
   align_loss: 0.0
-  #### 稀疏注意力计算
-  use_reliability_sgm: False
-  reliability_use_valid_mask: True
-  use_sparse_scene_reasoning: False
-  sparse_keep_ratio: 0.25
-  sparse_min_fine_tokens: 128
-  sparse_corr_radius: 0.12
-  sparse_corr_topk: 8
+  # #### 稀疏注意力计算
+  # use_reliability_sgm: False
+  # reliability_use_valid_mask: True
+  # use_sparse_scene_reasoning: False
+  # sparse_keep_ratio: 0.25
+  # sparse_min_fine_tokens: 128
+  # sparse_corr_radius: 0.12
+  # sparse_corr_topk: 8

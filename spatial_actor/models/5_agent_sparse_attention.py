@@ -19,6 +19,9 @@ import spatial_actor.utils.model_utils as model_utils
 import spatial_actor.utils.agent_utils as agent_utils
 from spatial_actor.utils.lr_sched_utils import GradualWarmupScheduler, Lamb
 
+########### sparse_attention_depth_choose
+###### 在全局交互计算时，只计算相邻点，或者跨视角对应点，放弃全局注意力计算
+##### 使用深度置信函数，判断DAv2和resnet提取的原始深度
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -774,13 +777,13 @@ class Agent:
 
             loss_log = {
                 "total_loss": total_loss.item(),
-                "trans_loss": trans_loss.item(),
-                "rot_loss_x": rot_loss_x.item(),
-                "rot_loss_y": rot_loss_y.item(),
-                "rot_loss_z": rot_loss_z.item(),
-                "grip_loss": grip_loss.item(),
-                "collision_loss": collision_loss.item(),
-                'align_loss': align_loss.item(),
+                # "trans_loss": trans_loss.item(),
+                # "rot_loss_x": rot_loss_x.item(),
+                # "rot_loss_y": rot_loss_y.item(),
+                # "rot_loss_z": rot_loss_z.item(),
+                # "grip_loss": grip_loss.item(),
+                # "collision_loss": collision_loss.item(),
+                # 'align_loss': align_loss.item(),
                 "lr": self._optimizer.param_groups[0]["lr"],
             }
             manage_loss_log(self, loss_log, reset_log=reset_log)

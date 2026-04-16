@@ -7,9 +7,9 @@ from torch.cuda.amp import autocast
 
 from spatial_actor.models.modules.depth_expert.depth_anything_v2 import DepthAnythingV2
 import spatial_actor.utils.model_utils as model_utils
-from spatial_actor.models.model import SpatialActor
+from spatial_actor.models.model import SpatialActor, SpatialActorPatchified
 
-################## original no change
+######### 非对称设计：阶段1 patchify + 阶段2 解耦设计
 
 def encoder_text(clip_model, dtype, texts=None, tokens=None, return_cls=False):
     assert texts is not None or tokens is not None
@@ -120,7 +120,7 @@ class Network(nn.Module):
         for p in self.depth_expert.parameters():
             p.requires_grad = False
 
-        self.spatial_actor1 = SpatialActor(
+        self.spatial_actor1 = SpatialActorPatchified(
             **args,
             renderer=self.renderer,
             no_feat=True)

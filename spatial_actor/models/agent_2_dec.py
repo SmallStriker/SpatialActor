@@ -19,6 +19,7 @@ import spatial_actor.utils.model_utils as model_utils
 import spatial_actor.utils.agent_utils as agent_utils
 from spatial_actor.utils.lr_sched_utils import GradualWarmupScheduler, Lamb
 
+######### 非对称设计：阶段1 patchify + 阶段2 解耦设计
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -774,13 +775,13 @@ class Agent:
 
             loss_log = {
                 "total_loss": total_loss.item(),
-                # "trans_loss": trans_loss.item(),
-                # "rot_loss_x": rot_loss_x.item(),
-                # "rot_loss_y": rot_loss_y.item(),
-                # "rot_loss_z": rot_loss_z.item(),
-                # "grip_loss": grip_loss.item(),
-                # "collision_loss": collision_loss.item(),
-                # 'align_loss': align_loss.item(),
+                "trans_loss": trans_loss.item(),
+                "rot_loss_x": rot_loss_x.item(),
+                "rot_loss_y": rot_loss_y.item(),
+                "rot_loss_z": rot_loss_z.item(),
+                "grip_loss": grip_loss.item(),
+                "collision_loss": collision_loss.item(),
+                'align_loss': align_loss.item(),
                 "lr": self._optimizer.param_groups[0]["lr"],
             }
             manage_loss_log(self, loss_log, reset_log=reset_log)

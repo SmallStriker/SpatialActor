@@ -136,7 +136,6 @@ class RotaryPositionEncoding3D(RotaryPositionEncoding):
         @return:
         '''
         bsize, npoint, _ = XYZ.shape
-        ### 解析真实坐标
         x_position, y_position, z_position = XYZ[..., 0:1], XYZ[..., 1:2], XYZ[..., 2:3]
         div_term = torch.exp(
             torch.arange(0, self.feature_dim // 3, 2, dtype=torch.float, device=XYZ.device)
@@ -400,8 +399,7 @@ class SpatialTransformer(nn.Module):
 
         spatial_feat = spatial_feat.view(bs, num_img, _c, _h, _w).permute(0, 1, 3, 4, 2)
         spatial_feat = spatial_feat.reshape(bs, num_img*_h*_w, _c)
-        # 使用 embed_rotary 将位置信息“乘”入 spatial_feat
-        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin) 
+        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin) # 使用 embed_rotary 将位置信息“乘”入 spatial_feat
 
         spatial_feat = spatial_feat.view(bs*num_img, _h, _w, _c).permute(0, 3, 1, 2)
         spatial_feat = self.spatial_feat_proj(spatial_feat)
@@ -424,7 +422,7 @@ class SpatialTransformer(nn.Module):
         num_lang_tok = lang_feat.shape[1]
         spatial_feat = torch.cat((lang_feat, spatial_feat), dim=1) # 语言指令: 将 lang_feat 拼接到序列头部，类似于 BERT 的 [CLS] token
 
-        x = self.fc_bef_attn(spatial_feat) # fc_bef_attn 投影 ### 拼接完语言指令后线形层投影
+        x = self.fc_bef_attn(spatial_feat) # fc_bef_attn 投影
 
         lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]  # 切分出语言部分lx 和图像部分 imgx
 

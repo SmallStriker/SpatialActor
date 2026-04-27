@@ -56,7 +56,7 @@ conda activate spact
 cd /home/et24-huanggf/robot/SpatialActor
 python spatial_actor/train.py --cfg_path spatial_actor/configs/spact_ablation_sparse.yaml --device 3
 
-################# patchify + 解耦
+################# patchify + 解耦 训练代码
 python spatial_actor/train.py \
 --device 4,5 \
 --iter-based \

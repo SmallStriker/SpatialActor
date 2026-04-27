@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.ops import FeaturePyramidNetwork
 
-######### original no change 
+######### 非对称设计：阶段1 patchify + 阶段2 解耦设计
 
 from spatial_actor.models.modules.attn import (
     Conv2DBlock,
@@ -20,6 +20,7 @@ from spatial_actor.models.modules.attn import (
 from spatial_actor.models.modules.backbone import (
     load_clip,
     load_imagenet_res50,
+    load_imagenet_res18,
 )
 from spatial_actor.models.modules.convex_up import ConvexUpSample
 
@@ -136,6 +137,7 @@ class RotaryPositionEncoding3D(RotaryPositionEncoding):
         @return:
         '''
         bsize, npoint, _ = XYZ.shape
+        ### 解析真实坐标
         x_position, y_position, z_position = XYZ[..., 0:1], XYZ[..., 1:2], XYZ[..., 2:3]
         div_term = torch.exp(
             torch.arange(0, self.feature_dim // 3, 2, dtype=torch.float, device=XYZ.device)
@@ -399,7 +401,8 @@ class SpatialTransformer(nn.Module):
 
         spatial_feat = spatial_feat.view(bs, num_img, _c, _h, _w).permute(0, 1, 3, 4, 2)
         spatial_feat = spatial_feat.reshape(bs, num_img*_h*_w, _c)
-        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin) # 使用 embed_rotary 将位置信息“乘”入 spatial_feat
+        # 使用 embed_rotary 将位置信息“乘”入 spatial_feat
+        spatial_feat = RotaryPositionEncoding.embed_rotary(spatial_feat, pe_cos, pe_sin) 
 
         spatial_feat = spatial_feat.view(bs*num_img, _h, _w, _c).permute(0, 3, 1, 2)
         spatial_feat = self.spatial_feat_proj(spatial_feat)
@@ -422,7 +425,7 @@ class SpatialTransformer(nn.Module):
         num_lang_tok = lang_feat.shape[1]
         spatial_feat = torch.cat((lang_feat, spatial_feat), dim=1) # 语言指令: 将 lang_feat 拼接到序列头部，类似于 BERT 的 [CLS] token
 
-        x = self.fc_bef_attn(spatial_feat) # fc_bef_attn 投影
+        x = self.fc_bef_attn(spatial_feat) # fc_bef_attn 投影 ### 拼接完语言指令后线形层投影
 
         lx, imgx = x[:, :num_lang_tok], x[:, num_lang_tok:]  # 切分出语言部分lx 和图像部分 imgx
 
@@ -452,6 +455,329 @@ class SpatialTransformer(nn.Module):
 
         return x
 
+
+
+class SpatialActorPatchified(nn.Module):
+    def __init__(
+        self,
+        lang_dim,
+        lang_len,
+        add_proprio,
+        proprio_dim,
+        proprio_cat_dim,
+        spt_view_layers,
+        spt_scene_layers,
+        im_channels,
+        attn_dim,
+        attn_heads,
+        attn_dim_head,
+        activation,
+        weight_tie_layers,
+        attn_dropout,
+        img_patch_size,
+        final_dim,
+        img_feat_dim,
+        num_rot,
+        feat_dim,
+        img_size,
+        add_corr,
+        norm_corr,
+        add_pixel_loc,
+        add_depth,
+        xops,
+        renderer,
+        no_feat,
+        align_loss,
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.lang_dim = lang_dim
+        self.lang_len = lang_len
+        self.add_proprio = add_proprio
+        self.proprio_dim = proprio_dim
+        self.proprio_cat_dim = proprio_cat_dim
+
+        self.spt_view_layers = spt_view_layers
+        self.spt_scene_layers = spt_scene_layers
+        self.im_channels = im_channels
+
+        self.img_patch_size = img_patch_size
+        self.final_dim = final_dim
+        self.img_feat_dim = img_feat_dim
+        self.num_rot = num_rot
+        self.img_size = img_size
+
+        self.add_corr = add_corr
+        self.norm_corr = norm_corr
+        self.add_pixel_loc = add_pixel_loc
+        self.add_depth = add_depth
+
+        self.no_feat = no_feat
+        self.align_loss = align_loss
+
+        self.renderer = renderer
+        self.num_img = self.renderer.num_img
+
+        if self.add_proprio:
+            self.input_dim_before_seq = self.im_channels + self.proprio_cat_dim
+        else:
+            self.input_dim_before_seq = self.im_channels
+
+        inp_img_feat_dim = self.img_feat_dim
+        if self.add_corr:
+            inp_img_feat_dim += 3
+        if self.add_pixel_loc:
+            inp_img_feat_dim += 3
+            self.pixel_loc = torch.zeros(
+                (self.num_img, 3, self.img_size, self.img_size)
+            )
+            self.pixel_loc[:, 0, :, :] = (
+                torch.linspace(-1, 1, self.num_img).unsqueeze(-1).unsqueeze(-1)
+            )
+            self.pixel_loc[:, 1, :, :] = (
+                torch.linspace(-1, 1, self.img_size).unsqueeze(0).unsqueeze(-1)
+            )
+            self.pixel_loc[:, 2, :, :] = (
+                torch.linspace(-1, 1, self.img_size).unsqueeze(0).unsqueeze(0)
+            )
+        if self.add_depth:
+            inp_img_feat_dim += 1
+
+        self.input_preprocess = lambda x: x
+
+        # Keep Stage1 token grid at 16x16 for 224x224 inputs.
+        self.fpn_fuse_dim = self.im_channels - (self.im_channels % 12)
+        self.stage1_patch_stride = 14
+
+        ### 第一阶段，卷积步长14，分辨率固定为16*16，特征维度降到120方便3D RoPE计算
+        self.patchify = Conv2DBlock(
+            inp_img_feat_dim,
+            self.fpn_fuse_dim,
+            kernel_sizes=self.img_patch_size,
+            strides=self.stage1_patch_stride,
+            norm="group",
+            activation=activation,
+            padding=0,
+        )
+
+        self.lang_proj = DenseBlock(
+            self.lang_dim,
+            self.input_dim_before_seq,
+            norm="group",
+            activation=activation,
+        )
+
+        if self.add_proprio:
+            self.proprio_proj = DenseBlock(
+                self.proprio_dim,
+                self.proprio_cat_dim,
+                norm="group",
+                activation=activation,
+            )
+
+        self.spatial_transformer = SpatialTransformer(
+            spt_view_layers=spt_view_layers,
+            spt_scene_layers=spt_scene_layers,
+            attn_dim=attn_dim,
+            attn_heads=attn_heads,
+            attn_dim_head=attn_dim_head,
+            fpn_fuse_dim=self.fpn_fuse_dim,
+            im_channels=im_channels,
+            input_dim_before_seq=self.input_dim_before_seq,
+            lang_len=lang_len,
+            activation=activation,
+            weight_tie_layers=weight_tie_layers,
+            attn_dropout=attn_dropout,
+            xops=xops,
+        )
+
+        self.trans_head = ConvexUpSample(
+            in_dim=self.input_dim_before_seq,
+            out_dim=1,
+            up_ratio=self.stage1_patch_stride, ## 不实用原始分辨率，此处自定义一个上采样分辨率
+        )
+
+        if not self.no_feat:
+            fc_head_dim = 0
+            fc_head_dim += self.input_dim_before_seq
+            fc_head_dim += self.input_dim_before_seq
+
+            def get_fc_head(_feat_in_size, _feat_out_size, _fc_head_dim=fc_head_dim):
+                layers = [
+                    nn.Linear(_feat_in_size, _fc_head_dim),
+                    nn.ReLU(),
+                    nn.Linear(_fc_head_dim, _fc_head_dim // 2),
+                    nn.ReLU(),
+                    nn.Linear(_fc_head_dim // 2, _feat_out_size),
+                ]
+                fc_head = nn.Sequential(*layers)
+                return fc_head
+
+            feat_out_size = feat_dim
+            assert self.num_rot * 3 <= feat_out_size
+            feat_out_size_ex_rot = feat_out_size - (self.num_rot * 3)
+            if feat_out_size_ex_rot > 0:
+                self.fc_head_ex_rot = get_fc_head(self.num_img * fc_head_dim, feat_out_size_ex_rot)
+
+            self.fc_head_init_bn = nn.BatchNorm1d(self.num_img * fc_head_dim)
+            self.fc_head_pe = FixedPositionalEncoding(self.num_img * fc_head_dim, feat_scale_factor=1)
+            self.fc_head_x = get_fc_head(self.num_img * fc_head_dim, self.num_rot)
+            self.fc_head_y = get_fc_head(self.num_img * fc_head_dim, self.num_rot)
+            self.fc_head_z = get_fc_head(self.num_img * fc_head_dim, self.num_rot)
+        
+        global select_feat_from_hm
+        from point_renderer.rvt_ops import select_feat_from_hm
+
+    def forward(
+        self,
+        img,
+        proprio=None,
+        lang_emb=None,
+        wpt_local=None,
+        rot_x_y=None,
+        depth_expert=None,
+    ):
+        bs, num_img, img_feat_dim, h, w = img.shape
+        assert num_img == self.num_img
+        assert h == w == self.img_size
+
+        img = img.view(bs * num_img, img_feat_dim, h, w)
+        d0 = self.input_preprocess(img)
+
+        spatial_feat = self.patchify(d0)
+
+        lang_feat = self.lang_proj(
+            lang_emb.view(bs * self.lang_len, self.lang_dim)
+        )
+
+        _b, _c, _h, _w = spatial_feat.shape
+
+        if self.add_proprio:
+            proprio_feat = self.proprio_proj(proprio)
+            proprio_feat = proprio_feat.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, num_img, _h, _w)
+        else:
+            proprio_feat = None
+
+        x = self.spatial_transformer(
+            d0=d0,
+            num_img=num_img,
+            spatial_feat=spatial_feat,
+            lang_feat=lang_feat,
+            proprio_feat=proprio_feat,
+        )
+
+        feat = []
+        _feat = torch.max(torch.max(x, dim=-1)[0], dim=-1)[0]
+        _feat = _feat.view(bs, -1)
+        feat.append(_feat)
+
+        x = (
+            x.transpose(1, 2)
+            .clone()
+            .view(
+                bs * self.num_img, self.input_dim_before_seq, _h, _w
+            )
+        )
+        
+        trans = self.trans_head(x)
+        trans = trans.view(bs, self.num_img, h, w)
+
+        if not self.training:
+            wpt_local = self.get_wpt(
+                out={"trans": trans.clone().detach()},
+                dyn_cam_info=None,
+            )
+
+        wpt_img = self.get_pt_loc_on_img(
+            wpt_local.unsqueeze(1),
+            dyn_cam_info=None,
+        )
+        wpt_img = wpt_img.reshape(bs * self.num_img, 2)
+        wpt_img = (wpt_img * (x.shape[-1] / float(self.img_size))).unsqueeze(1)
+
+        if not self.no_feat:
+            from point_renderer.rvt_ops import select_feat_from_hm
+            assert (
+                0 <= wpt_img.min() and wpt_img.max() <= x.shape[-1]
+            ), print(wpt_img, x.shape)
+            
+            _feat = select_feat_from_hm(wpt_img, x)[0].view(bs, -1)
+            feat.append(_feat) 
+            feat = torch.cat(feat, dim=-1)
+            feat = feat.unsqueeze(1)
+
+            feat_ex_rot = self.fc_head_ex_rot(feat) 
+            feat_rot = self.fc_head_init_bn(feat.permute(0, 2, 1)).permute(0, 2, 1)
+            feat_x = self.fc_head_x(feat_rot) 
+
+            if self.training:
+                rot_x = rot_x_y[..., 0].view(bs, 1)
+            else:
+                rot_x = feat_x[:,0].argmax(dim=1, keepdim=True)
+            rot_x_pe = self.fc_head_pe(rot_x).unsqueeze(1)
+            feat_y = self.fc_head_y(feat_rot + rot_x_pe)
+
+            if self.training:
+                rot_y = rot_x_y[..., 1].view(bs, 1)
+            else:
+                rot_y = feat_y[:,0].argmax(dim=1, keepdim=True)
+            rot_y_pe = self.fc_head_pe(rot_y).unsqueeze(1)
+            
+            feat_z = self.fc_head_z(feat_rot + rot_x_pe + rot_y_pe)
+            out = { 
+                "feat_ex_rot": feat_ex_rot,
+                "feat_x": feat_x,
+                "feat_y": feat_y,
+                "feat_z": feat_z,
+            }
+        else:
+            out = {}
+
+        out.update({"trans": trans}) 
+
+        return out
+
+    def get_pt_loc_on_img(self, pt, dyn_cam_info):
+        pt_img = self.renderer.get_pt_loc_on_img(
+            pt, fix_cam=True, dyn_cam_info=dyn_cam_info
+        )
+        return pt_img
+
+    def get_wpt(self, out, dyn_cam_info, y_q=None):
+        nc = self.num_img
+        h = w = self.img_size
+        bs = out["trans"].shape[0]
+
+        q_trans = out["trans"].view(bs, nc, h * w)
+        hm = torch.nn.functional.softmax(q_trans, 2)
+        hm = hm.view(bs, nc, h, w)
+
+        if dyn_cam_info is None:
+            dyn_cam_info_itr = (None,) * bs
+        else:
+            dyn_cam_info_itr = dyn_cam_info
+
+        pred_wpt = [
+            self.renderer.get_max_3d_frm_hm_cube(
+                hm[i : i + 1],
+                fix_cam=True,
+                dyn_cam_info=dyn_cam_info_itr[i : i + 1]
+                if not (dyn_cam_info_itr[i] is None)
+                else None,
+            )
+            for i in range(bs)
+        ]
+        pred_wpt = torch.cat(pred_wpt, 0)
+        if pred_wpt.shape[1] > 1:
+            pred_wpt = torch.mean(pred_wpt, 1)
+        else:
+            pred_wpt = pred_wpt.squeeze(1)
+        assert y_q is None
+        return pred_wpt
+
+    def free_mem(self):
+        pass
 
 class SpatialActor(nn.Module):
     def __init__(
@@ -634,6 +960,9 @@ class SpatialActor(nn.Module):
         # geometric encoder ######### 几何encoder，代码中没有设置 requires_grad = False，因此它是可训练的。
         if self.geo_enc_type in ['RN50']:
             self.geometric_encoder, self.depth_norm = load_imagenet_res50(pretrained=True)
+        # elif self.geo_enc_type in ['RN18']:
+        #     self.geometric_encoder, self.depth_norm = load_imagenet_res18(pretrained=True)
+        #     geo_channels = [64, 64, 128, 256, 512]
         else:
             raise NotImplementedError
 
